@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(netstat:*)",
+      "Bash(findstr:*)",
+      "Bash(docker logs:*)",
+      "Bash(docker exec:*)",
+      "Bash(python -c:*)",
+      "Bash(python:*)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''cso_poc/schemas.py''\\).read\\(\\)\\); print\\(''schemas.py OK''\\)\")",
+      "Bash(python3:*)",
+      "Bash(perl -ne:*)",
+      "Bash(powershell -Command \"if \\($env:ANTHROPIC_API_KEY\\) { $env:ANTHROPIC_API_KEY.Substring\\(0,10\\) + ''...'' } else { ''NOT SET'' }\")",
+      "Bash(set:*)",
+      "Bash(docker compose:*)",
+      "Bash(timeout:*)",
+      "Bash(curl:*)",
+      "Bash(Start-Sleep -Seconds 5)",
+      "Bash(where:*)",
+      "Bash(C:\\\\Python311\\\\python.exe:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}

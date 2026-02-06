@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+*.egg-info/
+.eggs/
+dist/
+build/
+nul
+UsersdarriAppDataLocalTemp*

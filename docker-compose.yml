@@ -1,0 +1,111 @@
+# ==========================================================================
+# Cognitive Singularity Architecture — Docker Compose
+# ==========================================================================
+#
+#  Network topology (enforces Strictly Gated MCP WRITE):
+#
+#                  dashboard-net         orchestration-net         backend-net
+#                ┌──────────────┐      ┌───────────────┐       ┌──────────────┐
+#                │              │      │               │       │              │
+#                │  dashboard   │      │  cso-         │       │  mock-       │
+#                │  (Layer 2)   ├──┐┌──┤  orchestrator ├──┐ ┌──┤  pms-db      │
+#                │              │  ││  │  (Layer 4)    │  │ │  │  (Layer 7)   │
+#                │              │  ││  │               │  │ │  │              │
+#                └──────────────┘  ││  └───────────────┘  │ │  └──────────────┘
+#                                  ││                     │ │
+#                                  ││               ┌─────┴─┴──────┐
+#                                  │└───────────────┤              │
+#                                  └────────────────┤  mcp-        │
+#                                                   │  hospitality │
+#                                                   │  gateway     │
+#                                                   │  (Layer 5)   │
+#                                                   │              │
+#                                                   └──────────────┘
+#
+#  - The orchestrator has NO route to mock-pms-db.
+#  - The dashboard has NO route to the gateway or the DB.
+#  - All writes pass through the MCP gateway's policy gates.
+# ==========================================================================
+
+services:
+
+  # ── Layer 7: System of Record ──────────────────────────────────────────
+  mock-pms-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cso
+      POSTGRES_PASSWORD: cso_secret
+      POSTGRES_DB: pms
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - backend-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cso -d pms"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # ── Layer 5: MCP Hospitality Gateway ───────────────────────────────────
+  mcp-hospitality-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    environment:
+      DATABASE_URL: "postgresql://cso:cso_secret@mock-pms-db:5432/pms"
+      FASTMCP_HOST: "0.0.0.0"
+    depends_on:
+      mock-pms-db:
+        condition: service_healthy
+    networks:
+      - orchestration-net
+      - backend-net
+    ports:
+      - "9000:8000"
+
+  # ── Layer 4: CSO Orchestrator (Reasoning Core + API) ───────────────────
+  cso-orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    environment:
+      MCP_GATEWAY_URL: "http://mcp-hospitality-gateway:8000/sse"
+      CSO_DEMO_MODE: "api"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+    depends_on:
+      - mcp-hospitality-gateway
+    networks:
+      - orchestration-net
+      - dashboard-net
+    ports:
+      - "9001:8001"
+    # The orchestrator is NOT on backend-net.
+    # It cannot resolve or route to mock-pms-db.
+
+  # ── Layer 2: Executive Demo Dashboard ──────────────────────────────────
+  cso-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    environment:
+      ORCHESTRATOR_URL: "http://cso-orchestrator:8001"
+    depends_on:
+      - cso-orchestrator
+    networks:
+      - dashboard-net
+    ports:
+      - "9501:8501"
+    # The dashboard is NOT on orchestration-net or backend-net.
+    # It can only talk to the orchestrator's HTTP API.
+
+networks:
+  orchestration-net:
+    driver: bridge
+  backend-net:
+    driver: bridge
+  dashboard-net:
+    driver: bridge
+
+volumes:
+  pgdata:

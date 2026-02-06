@@ -1,0 +1,15 @@
+# Layer 5 — MCP Hospitality Gateway
+# The only service with routes to BOTH the orchestration and backend networks.
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY pyproject.toml .
+COPY cso_poc/ cso_poc/
+
+RUN pip install --no-cache-dir "mcp[cli]>=1.0.0" "pydantic>=2.0" "asyncpg>=0.29" "uvicorn>=0.27"
+
+EXPOSE 8000
+
+CMD ["python", "-m", "cso_poc.mcp_server"]
