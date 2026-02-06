@@ -308,3 +308,98 @@ class TestComparison4ProactiveRecovery:
         rc = self.comp["comparison"]["room_comparison"]
         assert rc is not None
         assert rc["cso_room"] == "101"
+
+
+# =========================================================================
+# Test 5 (Hardest): VIP Concierge Bundle
+# =========================================================================
+
+class TestScenario5VIPConciergeBundle:
+    """
+    Guest G-1001 (Diamond) at LHRW01: extend checkout to 5PM, move to
+    ground-floor pet-friendly suite near exit, apply SNA, add breakfast.
+    Expected: 6 actions (checkout clamped 4PM + drink voucher + room query
+    + room 101 + SNA + breakfast).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _run(self, client):
+        self.data = run_scenario(client, "vip_concierge_bundle")
+
+    def test_status_partial_or_escalation(self):
+        assert self.data["status"] in (
+            "Partial_Fulfillment",
+            "Human_Escalation_Required",
+            "Executable",
+        )
+
+    def test_checkout_clamped_to_4pm(self):
+        for action in self.data["actions"]:
+            if action.get("action") == "pms_update_reservation":
+                result = action.get("result", {})
+                new_checkout = result.get("new_checkout", "")
+                assert "T16:00" in new_checkout, \
+                    f"Checkout should be clamped to 16:00, got {new_checkout}"
+                return
+        pytest.fail("No pms_update_reservation action found")
+
+    def test_drink_voucher_compromise(self):
+        voucher_found = any(
+            a.get("action") == "loyalty_allocate_benefit"
+            and a.get("result", {}).get("benefit_type") == "ComplimentaryDrinkVoucher"
+            for a in self.data["actions"]
+        )
+        assert voucher_found, "Drink voucher should be issued as compensation"
+
+    def test_suite_night_award(self):
+        sna_found = any(
+            a.get("action") == "loyalty_allocate_benefit"
+            and a.get("result", {}).get("benefit_type") == "SuiteNightAward"
+            for a in self.data["actions"]
+        )
+        assert sna_found, "Suite Night Award should be allocated"
+
+    def test_breakfast_allocated(self):
+        breakfast_found = any(
+            a.get("action") == "loyalty_allocate_benefit"
+            and a.get("result", {}).get("benefit_type") == "ComplimentaryBreakfast"
+            for a in self.data["actions"]
+        )
+        assert breakfast_found, "Complimentary breakfast should be allocated"
+
+    def test_room_query_executed(self):
+        query_found = any(
+            a.get("action") == "pms_query_rooms"
+            for a in self.data["actions"]
+        )
+        assert query_found, "Room query should have been executed"
+
+    def test_reassigned_to_room_101(self):
+        for action in self.data["actions"]:
+            if action.get("action") == "pms_reassign_room":
+                result = action.get("result", {})
+                assert result.get("new_room") == "101", \
+                    f"Expected room 101, got {result.get('new_room')}"
+                return
+        pytest.fail("No pms_reassign_room action found")
+
+
+class TestComparison5VIPConciergeBundle:
+    """CSO handles all sub-intents; mesh loses voucher and/or room accuracy."""
+
+    @pytest.fixture(autouse=True)
+    def _run(self, client):
+        self.comp = run_comparison(client, "vip_concierge_bundle")
+
+    def test_cso_has_voucher(self):
+        vc = self.comp["comparison"]["voucher_comparison"]
+        assert vc["cso_has_voucher"] is True
+
+    def test_cso_assigns_101(self):
+        rc = self.comp["comparison"]["room_comparison"]
+        assert rc is not None
+        assert rc["cso_room"] == "101"
+
+    def test_cso_outperforms_or_matches_mesh(self):
+        c = self.comp["comparison"]
+        assert c["cso_action_count"] >= c["mesh_action_count"]

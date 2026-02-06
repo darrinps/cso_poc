@@ -10,6 +10,7 @@ Agent chains per scenario:
   2. tier_gated_denial:     Profile → Coordinator → Reservation → Coordinator → Loyalty
   3. multi_intent_compromise: Profile → Coordinator → Reservation → Coordinator → Loyalty → Coordinator (wine)
   4. proactive_recovery:    Profile → Coordinator → Rooms
+  5. vip_concierge_bundle:  Profile → Coordinator → Reservation → Coordinator → Rooms → Coordinator → Loyalty
 """
 
 from __future__ import annotations
@@ -410,6 +411,127 @@ async def _mesh_proactive_recovery(
 
 
 # ---------------------------------------------------------------------------
+# Scenario 5 — VIP Concierge Bundle (7-agent stress test)
+# ---------------------------------------------------------------------------
+
+async def _mesh_vip_concierge(
+    session: ClientSession, config: ScenarioConfig, profile: dict,
+) -> MeshResult:
+    result = MeshResult(scenario_name=config.name)
+    trace_id = result.trace_id
+
+    stays = profile.get("stays", [])
+    lhrw_stay = next(
+        (s for s in stays if s.get("property_code") == "LHRW01"), stays[0]
+    )
+    res_id = lhrw_stay.get("reservation_id", "R-5001")
+
+    # ── Agent 1: ProfileAgent ─────────────────────────────────────
+    profile_msg = (
+        f"Summarize this guest profile:\n{json.dumps(profile, indent=2)}\n\n"
+        f"The guest's request: {config.raw_message}"
+    )
+    profile_result = await run_agent(
+        "ProfileAgent", profile_msg, session, trace_id,
+    )
+    _record_agent(result, profile_result, "summarize_profile",
+                  {"guest_id": config.guest_id})
+
+    # ── Agent 2: CoordinatorAgent → route checkout first ──────────
+    coord1_msg = (
+        f"Previous agent summary:\n{profile_result.summary}\n\n"
+        f"The guest has many requests: checkout extension, room change, "
+        f"Suite Night Award, and breakfast. Route the checkout extension "
+        f"to the Reservation specialist first. Summarize in 2-3 sentences."
+    )
+    coord1_result = await run_agent(
+        "CoordinatorAgent", coord1_msg, session, trace_id,
+    )
+    _record_agent(result, coord1_result, "coordinate_checkout",
+                  {"profile_summary": profile_result.summary[:100]})
+
+    # ── Agent 3: ReservationAgent — try 5PM checkout ──────────────
+    res_msg = (
+        f"Coordinator handoff:\n{coord1_result.summary}\n\n"
+        f"Reservation ID: {res_id}\n"
+        f"Guest requested checkout at 5PM (17:00). Process this request. "
+        f"The checkout date is 2026-02-03."
+    )
+    res_result = await run_agent(
+        "ReservationAgent", res_msg, session, trace_id,
+    )
+    _record_agent(result, res_result, "checkout_request",
+                  {"coordinator_summary": coord1_result.summary[:100]})
+    _collect_tool_actions(result, res_result)
+
+    # ── Agent 4: CoordinatorAgent → route room change ─────────────
+    coord2_msg = (
+        f"Previous agent (Reservation) result:\n{res_result.summary}\n\n"
+        f"Now route the room change request to the Rooms specialist. "
+        f"The guest needs a ground-floor pet-friendly suite near the exit. "
+        f"Summarize in 2-3 sentences."
+    )
+    coord2_result = await run_agent(
+        "CoordinatorAgent", coord2_msg, session, trace_id,
+    )
+    _record_agent(result, coord2_result, "coordinate_rooms",
+                  {"reservation_summary": res_result.summary[:100]})
+
+    # ── Agent 5: RoomsAgent — query + reassign ────────────────────
+    rooms_msg = (
+        f"Coordinator handoff:\n{coord2_result.summary}\n\n"
+        f"Property code: LHRW01\n"
+        f"Reservation ID: {res_id}\n"
+        f"Find available rooms and reassign the guest."
+    )
+    rooms_result = await run_agent(
+        "RoomsAgent", rooms_msg, session, trace_id,
+    )
+    _record_agent(result, rooms_result, "query_and_reassign",
+                  {"coordinator_summary": coord2_result.summary[:100]})
+    _collect_tool_actions(result, rooms_result)
+
+    # ── Agent 6: CoordinatorAgent → route loyalty benefits ────────
+    coord3_msg = (
+        f"Previous agents handled checkout and room change.\n"
+        f"Reservation result: {res_result.summary[:100]}\n"
+        f"Room result: {rooms_result.summary[:100]}\n\n"
+        f"Now route the loyalty benefits to the Loyalty specialist. "
+        f"The guest wants a Suite Night Award and complimentary breakfast. "
+        f"Summarize in 2-3 sentences."
+    )
+    coord3_result = await run_agent(
+        "CoordinatorAgent", coord3_msg, session, trace_id,
+    )
+    _record_agent(result, coord3_result, "coordinate_loyalty",
+                  {"rooms_summary": rooms_result.summary[:100]})
+
+    # ── Agent 7: LoyaltyAgent — allocate SNA + breakfast ──────────
+    loyalty_msg = (
+        f"Coordinator handoff:\n{coord3_result.summary}\n\n"
+        f"Guest ID: {config.guest_id}\n"
+        f"Allocate the requested loyalty benefits."
+    )
+    loyalty_result = await run_agent(
+        "LoyaltyAgent", loyalty_msg, session, trace_id,
+    )
+    _record_agent(result, loyalty_result, "allocate_benefits",
+                  {"coordinator_summary": coord3_result.summary[:100]})
+    _collect_tool_actions(result, loyalty_result)
+
+    # ── Determine final status ────────────────────────────────────
+    has_errors = any(
+        a.get("result", {}).get("error") for a in result.final_actions
+    )
+    result.final_status = "Partial_Fulfillment" if has_errors else "Executable"
+    result.context_loss_summary = [
+        f"{h.agent_name}: {h.summary[:80]}"
+        for h in result.degradation_chain
+    ]
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -418,6 +540,7 @@ _MESH_HANDLERS = {
     "tier_gated_denial": _mesh_tier_gated_denial,
     "multi_intent_compromise": _mesh_multi_intent,
     "proactive_recovery": _mesh_proactive_recovery,
+    "vip_concierge_bundle": _mesh_vip_concierge,
 }
 
 

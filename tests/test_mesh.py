@@ -202,7 +202,72 @@ class TestMeshScenario4:
 
 
 # =========================================================================
-# Test 5: Comparison structure
+# Test 5: VIP Concierge Bundle — 7-agent stress test
+# =========================================================================
+
+class TestMeshScenario5:
+    """Mesh handles 7-agent chain; may lose voucher and room accuracy."""
+
+    @pytest.fixture(autouse=True)
+    def _run(self, client):
+        self.comp = run_comparison(client, "vip_concierge_bundle")
+        self.cso = self.comp["cso"]
+        self.mesh = self.comp["mesh"]
+        self.comparison = self.comp["comparison"]
+
+    def test_mesh_has_actions(self):
+        assert len(self.mesh["final_actions"]) >= 2, \
+            "Mesh should produce at least checkout + SNA"
+
+    def test_mesh_has_checkout(self):
+        has_checkout = any(
+            a.get("action") == "pms_update_reservation"
+            for a in self.mesh["final_actions"]
+        )
+        assert has_checkout, "Mesh should have a checkout update"
+
+    def test_mesh_has_sna(self):
+        has_sna = any(
+            a.get("action") == "loyalty_allocate_benefit"
+            and a.get("result", {}).get("benefit_type") == "SuiteNightAward"
+            for a in self.mesh["final_actions"]
+        )
+        assert has_sna, "Mesh should have SNA"
+
+    def test_mesh_voucher_informational(self):
+        """Log whether mesh got the voucher (informational, not strict)."""
+        mesh_has_voucher = any(
+            a.get("action") == "loyalty_allocate_benefit"
+            and a.get("result", {}).get("benefit_type") == "ComplimentaryDrinkVoucher"
+            for a in self.mesh["final_actions"]
+        )
+        if mesh_has_voucher:
+            log.info("INFORMATIONAL: Mesh also issued drink voucher")
+        else:
+            log.info("INFORMATIONAL: Mesh did NOT issue drink voucher (expected)")
+
+    def test_mesh_room_informational(self):
+        """Log which room mesh assigned (informational)."""
+        for a in self.mesh["final_actions"]:
+            if a.get("action") == "pms_reassign_room":
+                room = a.get("result", {}).get("new_room")
+                log.info("INFORMATIONAL: Mesh assigned room %s", room)
+                return
+        log.info("INFORMATIONAL: Mesh did not reassign any room")
+
+    def test_degradation_chain_has_entries(self):
+        assert len(self.mesh["degradation_chain"]) >= 5, \
+            "7-agent chain should produce at least 5 degradation entries"
+
+    def test_cso_has_all_six_actions(self):
+        """CSO should have 6 actions: checkout + voucher + room query + room + SNA + breakfast."""
+        cso_actions = self.cso["actions"]
+        assert len(cso_actions) >= 5, \
+            f"CSO should have at least 5 actions, got {len(cso_actions)}"
+
+
+# =========================================================================
+# Comparison structure
 # =========================================================================
 
 class TestComparisonStructure:

@@ -107,6 +107,38 @@ SCENARIOS: dict[str, ScenarioConfig] = {
             "CSO sees ALL context in one pass."
         ),
     ),
+    "vip_concierge_bundle": ScenarioConfig(
+        name="vip_concierge_bundle",
+        guest_id="G-1001",
+        raw_message=(
+            "I need several things for my London stay (reservation R-5001): "
+            "extend my checkout to 5 PM, move me to a ground-floor pet-friendly "
+            "suite near the exit because my friend is bringing a large service dog "
+            "to visit, and please apply my Suite Night Award and add a "
+            "complimentary breakfast."
+        ),
+        context=(
+            "Guest G-1001 (Diamond) at LHRW01, room 1412 (floor 14), "
+            "reservation R-5001. "
+            "Wants: 5PM checkout (policy max 4PM for Diamond), room change to "
+            "ground-floor pet-friendly suite near exit (for visiting service dog), "
+            "Suite Night Award, and complimentary breakfast. "
+            "Room change requires TWO steps: first pms_query_rooms to find a room "
+            "(property_code=LHRW01, pet_friendly=true, max_floor=2, near_exit=true, "
+            "room_type=suite), then pms_reassign_room to move the guest "
+            "(res_id=R-5001, reason='Room change for visiting service dog'). "
+            "Checkout clamp from 5PM to 4PM warrants ComplimentaryDrinkVoucher."
+        ),
+        mesh_annotation=(
+            "Mesh stress test (7-agent chain): combines checkout clamp + room "
+            "change + benefits. Reservation Agent confirms 4PM without mentioning "
+            "the 5PM clamp → Coordinator loses compensation context → Loyalty "
+            "Agent never issues drink voucher. Simultaneously, pet-friendly/suite/"
+            "near-exit constraints degrade through Coordinator → Rooms Agent "
+            "queries with incomplete filters → wrong room. CSO handles all 5 "
+            "sub-intents in a single reasoning pass with full context."
+        ),
+    ),
 }
 
 

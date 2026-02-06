@@ -1376,6 +1376,12 @@ _SCENARIO_UI = """\
     </button>
     <button class="compare-btn" onclick="runCompare('proactive_recovery')">Compare with Mesh</button>
 
+    <button class="scenario-btn" onclick="runScenario('vip_concierge_bundle')">
+      <div class="label">5. VIP Concierge Bundle</div>
+      <div class="desc">G-1001 (Diamond) &mdash; 5PM checkout + room change + SNA + breakfast</div>
+    </button>
+    <button class="compare-btn" onclick="runCompare('vip_concierge_bundle')">Compare with Mesh</button>
+
     <hr class="divider">
     <h2>Free-form Query</h2>
 
@@ -1456,6 +1462,20 @@ function scoreResult(scenario, data, isMesh) {
     checks.push({label:'Room query executed', pass: hasQuery});
     checks.push({label:'Pet-friendly room', pass: room === '101'});
     checks.push({label:'Correct room (101)', pass: room === '101'});
+  } else if (scenario === 'vip_concierge_bundle') {
+    const has4pm = actions.some(a => a.action === 'pms_update_reservation' && ((a.result||{}).new_checkout||'').includes('T16:00'));
+    const hasVoucher = actions.some(a => a.action === 'loyalty_allocate_benefit' && (a.result||{}).benefit_type === 'ComplimentaryDrinkVoucher');
+    const hasSNA = actions.some(a => a.action === 'loyalty_allocate_benefit' && (a.result||{}).benefit_type === 'SuiteNightAward');
+    const hasBkfst = actions.some(a => a.action === 'loyalty_allocate_benefit' && (a.result||{}).benefit_type === 'ComplimentaryBreakfast');
+    const hasRoomQuery = actions.some(a => a.action === 'pms_query_rooms');
+    const reassign = actions.find(a => a.action === 'pms_reassign_room');
+    const room = reassign ? (reassign.result||{}).new_room : null;
+    checks.push({label:'Checkout clamped to 4 PM', pass: has4pm});
+    checks.push({label:'Drink voucher issued', pass: hasVoucher});
+    checks.push({label:'Suite Night Award', pass: hasSNA});
+    checks.push({label:'Breakfast allocated', pass: hasBkfst});
+    checks.push({label:'Room query executed', pass: hasRoomQuery});
+    checks.push({label:'Room assigned (101)', pass: room === '101'});
   }
 
   const passed = checks.filter(c => c.pass).length;
