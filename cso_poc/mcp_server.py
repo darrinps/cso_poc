@@ -18,7 +18,7 @@ import functools
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -207,9 +207,12 @@ async def pms_update_reservation(
         11 AM window (up to 4 PM max).
       - Non-Diamond guests receive a 403 rejection.
     """
+    parsed_dt = datetime.fromisoformat(checkout_time)
+    if parsed_dt.tzinfo is None:
+        parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
     params = PmsUpdateReservationParams(
         res_id=res_id,
-        checkout_time=datetime.fromisoformat(checkout_time),
+        checkout_time=parsed_dt,
         notes=notes,
     )
     pool = await get_pool()
@@ -278,9 +281,12 @@ async def pms_update_checkin(
       - Check-in time must not be earlier than 14:00 (2 PM).
       - Reservation must exist.
     """
+    parsed_ci = datetime.fromisoformat(checkin_time)
+    if parsed_ci.tzinfo is None:
+        parsed_ci = parsed_ci.replace(tzinfo=timezone.utc)
     params = PmsUpdateCheckinParams(
         res_id=res_id,
-        checkin_time=datetime.fromisoformat(checkin_time),
+        checkin_time=parsed_ci,
         notes=notes,
     )
     pool = await get_pool()
