@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import threading
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -78,6 +79,7 @@ def _emit_breadcrumb(crumb: DecisionBreadcrumb) -> None:
             "action_taken": crumb.action_taken,
             "result": crumb.result,
             "timestamp": crumb.timestamp.isoformat(),
+            "latency_ms": crumb.latency_ms,
             "log_line": crumb.format_log_line(),
         })
 
@@ -361,47 +363,112 @@ async def execute_envelope(
     envelope: CanonicalIntentEnvelope,
     session: ClientSession,
 ) -> tuple[list[dict], list[DecisionBreadcrumb]]:
+    """
+    Deterministic execution of a CanonicalIntentEnvelope via MCP tool calls.
+
+    Saga tracking: maintains a committed_actions list so that on partial failure
+    we know exactly which actions succeeded and which were skipped. In production
+    this would integrate with compensating transactions (reversal tools) and
+    idempotency keys for safe retries. Here we emit a PARTIAL-EXECUTION-WARNING
+    breadcrumb and record the saga state in tactical memory.
+    """
     results: list[dict] = []
     crumbs: list[DecisionBreadcrumb] = []
+    committed_actions: list[dict] = []
 
     log.info("=== Executing Intent %s ===", envelope.intent_id)
     log.info("Status    : %s", envelope.status.value)
     log.info("Objective : %s", envelope.primary_objective)
 
-    for action in sorted(envelope.proposed_actions, key=lambda a: a.order):
+    sorted_actions = sorted(envelope.proposed_actions, key=lambda a: a.order)
+
+    for idx, action in enumerate(sorted_actions):
         tag = "COMPROMISE" if action.is_compromise else "STANDARD"
         params = {**action.parameters, "trace_id": envelope.intent_id}
 
         log.info("[%s] [%s] Calling %s (order=%d)",
                  envelope.intent_id, tag, action.tool_name, action.order)
-        call_result = await session.call_tool(action.tool_name, params)
 
-        content_text = "".join(
-            block.text for block in call_result.content if hasattr(block, "text")
-        )
         try:
-            parsed = json.loads(content_text)
-        except (json.JSONDecodeError, TypeError):
-            parsed = {"raw": content_text}
+            tool_start = time.time()
+            call_result = await session.call_tool(action.tool_name, params)
+            tool_latency_ms = (time.time() - tool_start) * 1000
 
-        is_error = "error" in parsed
-        result_label = f"DENIED({parsed.get('error')})" if is_error else "OK"
+            content_text = "".join(
+                block.text for block in call_result.content if hasattr(block, "text")
+            )
+            try:
+                parsed = json.loads(content_text)
+            except (json.JSONDecodeError, TypeError):
+                parsed = {"raw": content_text}
 
-        crumb = DecisionBreadcrumb(
-            trace_id=envelope.intent_id,
-            policy_reference=(
-                "COMPROMISE-EXECUTION" if action.is_compromise else action.tool_name
-            ),
-            action_taken=f"{action.tool_name}({json.dumps(action.parameters, default=str)})",
-            result=result_label,
-        )
-        _emit_breadcrumb(crumb)
-        crumbs.append(crumb)
-        results.append({
-            "action": action.tool_name,
-            "is_compromise": action.is_compromise,
-            "result": parsed,
-        })
+            is_error = "error" in parsed
+            result_label = f"DENIED({parsed.get('error')})" if is_error else "OK"
+
+            crumb = DecisionBreadcrumb(
+                trace_id=envelope.intent_id,
+                policy_reference=(
+                    "COMPROMISE-EXECUTION" if action.is_compromise else action.tool_name
+                ),
+                action_taken=f"{action.tool_name}({json.dumps(action.parameters, default=str)})",
+                result=result_label,
+                latency_ms=round(tool_latency_ms, 1),
+            )
+            _emit_breadcrumb(crumb)
+            crumbs.append(crumb)
+
+            action_record = {
+                "action": action.tool_name,
+                "is_compromise": action.is_compromise,
+                "result": parsed,
+            }
+            results.append(action_record)
+            committed_actions.append(action_record)
+
+            # On error mid-saga, emit partial execution warning
+            if is_error and idx < len(sorted_actions) - 1:
+                remaining = len(sorted_actions) - idx - 1
+                warn_crumb = DecisionBreadcrumb(
+                    trace_id=envelope.intent_id,
+                    policy_reference="PARTIAL-EXECUTION-WARNING",
+                    action_taken=f"saga_state(committed={len(committed_actions)}, failed={action.tool_name}, skipped={remaining})",
+                    result=f"Action {action.tool_name} returned error; {remaining} actions remaining",
+                )
+                _emit_breadcrumb(warn_crumb)
+                crumbs.append(warn_crumb)
+                memory.add_tactical_fact(
+                    f"Partial execution: {len(committed_actions)} committed, "
+                    f"{action.tool_name} failed, {remaining} remaining",
+                    trace_id=envelope.intent_id, domain="Saga",
+                    tags=["saga", "partial_execution"],
+                )
+
+        except Exception as exc:
+            tool_latency_ms = 0.0
+            log.error("Tool %s raised exception: %s", action.tool_name, exc)
+            parsed = {"error": str(exc)}
+            results.append({
+                "action": action.tool_name,
+                "is_compromise": action.is_compromise,
+                "result": parsed,
+            })
+
+            if idx < len(sorted_actions) - 1:
+                remaining = len(sorted_actions) - idx - 1
+                warn_crumb = DecisionBreadcrumb(
+                    trace_id=envelope.intent_id,
+                    policy_reference="PARTIAL-EXECUTION-WARNING",
+                    action_taken=f"saga_state(committed={len(committed_actions)}, exception={action.tool_name}, skipped={remaining})",
+                    result=f"Exception in {action.tool_name}: {exc}; {remaining} actions remaining",
+                )
+                _emit_breadcrumb(warn_crumb)
+                crumbs.append(warn_crumb)
+                memory.add_tactical_fact(
+                    f"Saga exception: {len(committed_actions)} committed, "
+                    f"{action.tool_name} exception: {exc}, {remaining} remaining",
+                    trace_id=envelope.intent_id, domain="Saga",
+                    tags=["saga", "exception"],
+                )
 
     for note in envelope.escalation_notes:
         crumb = DecisionBreadcrumb(
@@ -1382,6 +1449,24 @@ _SCENARIO_UI = """\
     </button>
     <button class="compare-btn" onclick="runCompare('vip_concierge_bundle')">Compare with Mesh</button>
 
+    <button class="scenario-btn" onclick="runScenario('contradictory_intent')">
+      <div class="label">6. Contradictory Intent</div>
+      <div class="desc">G-1001 (Diamond) &mdash; Late checkout + early check-in same day (impossible)</div>
+    </button>
+    <button class="compare-btn" onclick="runCompare('contradictory_intent')">Compare with Mesh</button>
+
+    <button class="scenario-btn" onclick="runScenario('ambiguous_escalation')">
+      <div class="label">7. Ambiguous Escalation</div>
+      <div class="desc">G-2002 (Gold) &mdash; Vague complaint, no actionable intent</div>
+    </button>
+    <button class="compare-btn" onclick="runCompare('ambiguous_escalation')">Compare with Mesh</button>
+
+    <button class="scenario-btn" onclick="runScenario('mesh_favorable_baseline')">
+      <div class="label">8. Mesh-Favorable Baseline</div>
+      <div class="desc">G-2002 (Gold) &mdash; Simple checkout time query (both equivalent)</div>
+    </button>
+    <button class="compare-btn" onclick="runCompare('mesh_favorable_baseline')">Compare with Mesh</button>
+
     <hr class="divider">
     <h2>Free-form Query</h2>
 
@@ -1476,6 +1561,29 @@ function scoreResult(scenario, data, isMesh) {
     checks.push({label:'Breakfast allocated', pass: hasBkfst});
     checks.push({label:'Room query executed', pass: hasRoomQuery});
     checks.push({label:'Room assigned (101)', pass: room === '101'});
+  } else if (scenario === 'contradictory_intent') {
+    const hasContradict = status === 'Rejected' || status === 'Human_Escalation_Required'
+      || escalations.some(n => /contradic|conflict|impossible|same day/i.test(n));
+    const noConflictActions = !actions.some(a => a.action === 'pms_update_reservation' || a.action === 'pms_update_checkin');
+    const escalated = status !== 'Executable';
+    checks.push({label:'Contradiction detected', pass: hasContradict});
+    checks.push({label:'No conflicting actions', pass: noConflictActions});
+    checks.push({label:'Escalation status', pass: escalated});
+  } else if (scenario === 'ambiguous_escalation') {
+    const ambiguityRecognised = status === 'Rejected' || status === 'Human_Escalation_Required'
+      || escalations.some(n => /ambigu|clarif|vague|unclear/i.test(n));
+    const noHallucinated = actions.length === 0;
+    const escalationRequired = status !== 'Executable' || escalations.length > 0;
+    checks.push({label:'Ambiguity recognised', pass: ambiguityRecognised});
+    checks.push({label:'No hallucinated actions', pass: noHallucinated});
+    checks.push({label:'Escalation required', pass: escalationRequired});
+  } else if (scenario === 'mesh_favorable_baseline') {
+    const simpleHandled = status === 'Executable' || status === 'Rejected' || status === 'Human_Escalation_Required';
+    const noErrors = !actions.some(a => (a.result||{}).error);
+    const noMutations = !actions.some(a => ['pms_update_reservation','pms_update_checkin','pms_reassign_room','loyalty_allocate_benefit'].includes(a.action));
+    checks.push({label:'Simple query handled', pass: simpleHandled});
+    checks.push({label:'No errors', pass: noErrors});
+    checks.push({label:'No mutation tools', pass: noMutations});
   }
 
   const passed = checks.filter(c => c.pass).length;
@@ -1870,7 +1978,9 @@ async def run_comparison_endpoint(name: str):
     config = SCENARIOS[name]
 
     # 1. Run CSO pipeline
+    cso_start = time.time()
     cso_result = await run_scenario(config)
+    cso_elapsed_ms = (time.time() - cso_start) * 1000
 
     # 2. Reset DB + memory between runs (mesh mutates same tables)
     memory.reset()
@@ -1883,7 +1993,9 @@ async def run_comparison_endpoint(name: str):
             await session.call_tool("_admin_reset_db", {"trace_id": "compare-reset"})
 
     # 3. Run mesh pipeline
+    mesh_start = time.time()
     mesh_result = await run_mesh_scenario(config)
+    mesh_elapsed_ms = (time.time() - mesh_start) * 1000
 
     # 4. Build comparison
     comparison = build_comparison(cso_result, mesh_result)
@@ -1893,6 +2005,11 @@ async def run_comparison_endpoint(name: str):
         "cso": cso_result,
         "mesh": mesh_result.to_dict(),
         "comparison": comparison,
+        "timing_summary": {
+            "cso_ms": round(cso_elapsed_ms, 1),
+            "mesh_ms": round(mesh_elapsed_ms, 1),
+            "total_ms": round(cso_elapsed_ms + mesh_elapsed_ms, 1),
+        },
     }
 
 

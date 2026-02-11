@@ -5,13 +5,15 @@ Requires the Docker stack to be running:
     docker compose up -d --build
 """
 
+import os
+
 import pytest
 import httpx
 
 
 @pytest.fixture(scope="session")
 def base_url():
-    return "http://localhost:9001"
+    return os.environ.get("CSO_TEST_BASE_URL", "http://localhost:9001")
 
 
 @pytest.fixture(scope="session")

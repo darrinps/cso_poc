@@ -403,3 +403,140 @@ class TestComparison5VIPConciergeBundle:
     def test_cso_outperforms_or_matches_mesh(self):
         c = self.comp["comparison"]
         assert c["cso_action_count"] >= c["mesh_action_count"]
+
+
+# =========================================================================
+# Test 6 (Adversarial): Contradictory Intent
+# =========================================================================
+
+class TestScenario6ContradictoryIntent:
+    """
+    Guest G-1001 (Diamond) asks for late checkout AND early check-in
+    on the same day for the same reservation — logically impossible.
+    Expected: Rejected or Escalation, contradiction detected, no conflicting actions.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _run(self, client):
+        self.data = run_scenario(client, "contradictory_intent")
+
+    def test_status_rejected_or_escalation(self):
+        assert self.data["status"] in (
+            "Rejected",
+            "Human_Escalation_Required",
+        ), f"Expected Rejected or Escalation, got {self.data['status']}"
+
+    def test_escalation_mentions_contradiction(self):
+        """Escalation notes or assertions should mention the contradiction."""
+        all_text = " ".join(self.data.get("escalation_notes", []))
+        all_text += " ".join(
+            ca.get("assertion", "") for ca in self.data.get("contextual_assertions", [])
+        )
+        all_text += " ".join(
+            si.get("description", "") for si in self.data.get("sub_intents", [])
+        )
+        all_text_lower = all_text.lower()
+        has_contradiction = any(
+            w in all_text_lower
+            for w in ["contradict", "conflict", "impossible", "incompatible",
+                      "cannot", "same day", "same reservation"]
+        )
+        assert has_contradiction, \
+            "Should mention contradiction in escalation notes or assertions"
+
+    def test_no_conflicting_actions_executed(self):
+        """Should not execute both checkout and check-in updates."""
+        has_checkout = any(
+            a.get("action") == "pms_update_reservation"
+            for a in self.data["actions"]
+        )
+        has_checkin = any(
+            a.get("action") == "pms_update_checkin"
+            for a in self.data["actions"]
+        )
+        assert not (has_checkout and has_checkin), \
+            "Should not execute both contradictory actions"
+
+
+# =========================================================================
+# Test 7 (Adversarial): Ambiguous Escalation
+# =========================================================================
+
+class TestScenario7AmbiguousEscalation:
+    """
+    Guest G-2002 (Gold) sends vague complaint with no actionable intent.
+    Expected: Escalation, 0 tool-based actions (no hallucination).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _run(self, client):
+        self.data = run_scenario(client, "ambiguous_escalation")
+
+    def test_status_escalation(self):
+        assert self.data["status"] in (
+            "Rejected",
+            "Human_Escalation_Required",
+        ), f"Expected escalation status, got {self.data['status']}"
+
+    def test_no_hallucinated_actions(self):
+        """No tool-based actions should be executed for an ambiguous request."""
+        mutation_actions = [
+            a for a in self.data["actions"]
+            if a.get("action") in (
+                "pms_update_reservation", "pms_update_checkin",
+                "loyalty_allocate_benefit", "pms_reassign_room",
+                "pms_query_rooms",
+            )
+        ]
+        assert len(mutation_actions) == 0, \
+            f"Should have 0 tool actions, got {len(mutation_actions)}"
+
+    def test_escalation_requests_clarification(self):
+        """Escalation notes should request clarification."""
+        all_text = " ".join(self.data.get("escalation_notes", []))
+        all_text += " ".join(
+            ca.get("assertion", "") for ca in self.data.get("contextual_assertions", [])
+        )
+        all_text += " ".join(
+            si.get("description", "") for si in self.data.get("sub_intents", [])
+        )
+        all_text_lower = all_text.lower()
+        has_clarification = any(
+            w in all_text_lower
+            for w in ["clarif", "ambigu", "vague", "unclear", "no specific",
+                      "staff", "manual", "escalat"]
+        )
+        assert has_clarification, \
+            "Should request clarification in escalation notes or assertions"
+
+
+# =========================================================================
+# Test 8 (Control): Mesh-Favorable Baseline
+# =========================================================================
+
+class TestScenario8MeshFavorableBaseline:
+    """
+    Guest G-2002 (Gold) asks "What time is checkout?" — simple lookup.
+    Expected: Executable (or escalation), no mutation tools called.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _run(self, client):
+        self.data = run_scenario(client, "mesh_favorable_baseline")
+
+    def test_status_executable(self):
+        assert self.data["status"] in (
+            "Executable",
+            "Rejected",
+            "Human_Escalation_Required",
+        )
+
+    def test_no_mutation_tools_called(self):
+        """Simple informational query should not invoke mutation tools."""
+        mutation_tools = {
+            "pms_update_reservation", "pms_update_checkin",
+            "loyalty_allocate_benefit", "pms_reassign_room",
+        }
+        for action in self.data["actions"]:
+            assert action.get("action") not in mutation_tools, \
+                f"Mutation tool {action.get('action')} should not be called for informational query"

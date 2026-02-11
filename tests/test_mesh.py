@@ -297,3 +297,102 @@ class TestComparisonStructure:
         for field in ["scenario_name", "trace_id", "steps", "final_actions",
                        "final_status", "degradation_chain"]:
             assert field in m, f"Missing mesh field: {field}"
+
+
+# =========================================================================
+# Test 6: Contradictory Intent — mesh processes independently
+# =========================================================================
+
+class TestMesh6ContradictoryIntent:
+    """Mesh processes contradictory requests independently without conflict detection."""
+
+    @pytest.fixture(autouse=True)
+    def _run(self, client):
+        self.comp = run_comparison(client, "contradictory_intent")
+        self.cso = self.comp["cso"]
+        self.mesh = self.comp["mesh"]
+        self.comparison = self.comp["comparison"]
+
+    def test_comparison_structure_valid(self):
+        for field in ["both_succeed", "cso_status", "mesh_status",
+                       "cso_action_count", "mesh_action_count"]:
+            assert field in self.comparison, f"Missing comparison field: {field}"
+
+    def test_cso_detects_contradiction(self):
+        assert self.cso["status"] in ("Rejected", "Human_Escalation_Required"), \
+            f"CSO should detect contradiction, got status={self.cso['status']}"
+
+    def test_degradation_chain_has_entries(self):
+        assert len(self.mesh["degradation_chain"]) > 0
+
+
+# =========================================================================
+# Test 7: Ambiguous Escalation — mesh may over-interpret
+# =========================================================================
+
+class TestMesh7AmbiguousEscalation:
+    """Mesh may over-interpret vague sentiment; CSO should escalate cleanly."""
+
+    @pytest.fixture(autouse=True)
+    def _run(self, client):
+        self.comp = run_comparison(client, "ambiguous_escalation")
+        self.cso = self.comp["cso"]
+        self.mesh = self.comp["mesh"]
+        self.comparison = self.comp["comparison"]
+
+    def test_comparison_structure_valid(self):
+        for field in ["both_succeed", "cso_status", "mesh_status",
+                       "cso_action_count", "mesh_action_count"]:
+            assert field in self.comparison, f"Missing comparison field: {field}"
+
+    def test_cso_escalates(self):
+        assert self.cso["status"] in ("Rejected", "Human_Escalation_Required"), \
+            f"CSO should escalate ambiguous request, got status={self.cso['status']}"
+
+    def test_degradation_chain_has_entries(self):
+        assert len(self.mesh["degradation_chain"]) > 0
+
+
+# =========================================================================
+# Test 8: Mesh-Favorable Baseline — both equivalent
+# =========================================================================
+
+class TestMesh8FavorableBaseline:
+    """Both architectures handle simple informational queries equivalently."""
+
+    @pytest.fixture(autouse=True)
+    def _run(self, client):
+        self.comp = run_comparison(client, "mesh_favorable_baseline")
+        self.cso = self.comp["cso"]
+        self.mesh = self.comp["mesh"]
+        self.comparison = self.comp["comparison"]
+
+    def test_comparison_structure_valid(self):
+        for field in ["both_succeed", "cso_status", "mesh_status",
+                       "cso_action_count", "mesh_action_count"]:
+            assert field in self.comparison, f"Missing comparison field: {field}"
+
+    def test_intellectual_honesty(self):
+        """Both pipelines should produce equivalent results for simple queries."""
+        cso_mutations = [
+            a for a in self.cso.get("actions", [])
+            if a.get("action") in (
+                "pms_update_reservation", "pms_update_checkin",
+                "loyalty_allocate_benefit", "pms_reassign_room",
+            )
+        ]
+        mesh_mutations = [
+            a for a in self.mesh.get("final_actions", [])
+            if a.get("action") in (
+                "pms_update_reservation", "pms_update_checkin",
+                "loyalty_allocate_benefit", "pms_reassign_room",
+            )
+        ]
+        assert len(cso_mutations) == 0, \
+            "CSO should not call mutation tools for informational query"
+        assert len(mesh_mutations) == 0, \
+            "Mesh should not call mutation tools for informational query"
+        log.info("INFORMATIONAL: Both CSO and mesh handled simple query without mutations")
+
+    def test_degradation_chain_has_entries(self):
+        assert len(self.mesh["degradation_chain"]) > 0

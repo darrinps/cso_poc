@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 from mcp import ClientSession
 from mcp.client.sse import sse_client
@@ -31,6 +32,7 @@ from cso_poc.mesh_agents import (
 )
 from cso_poc.orchestrator import MCP_GATEWAY_URL
 from cso_poc.scenarios import ScenarioConfig
+from cso_poc.scorecard import build_scorecard_comparison
 
 log = logging.getLogger("cso.mesh")
 
@@ -103,6 +105,7 @@ async def _mesh_single_benefit(
 ) -> MeshResult:
     result = MeshResult(scenario_name=config.name)
     trace_id = result.trace_id
+    t0 = time.time()
 
     # ProfileAgent: summarise guest profile
     profile_msg = (
@@ -141,6 +144,7 @@ async def _mesh_single_benefit(
     _collect_tool_actions(result, loyalty_result)
 
     result.final_status = "Executable"
+    result.timing = {"pipeline_ms": round((time.time() - t0) * 1000, 1)}
     return result
 
 
@@ -153,6 +157,7 @@ async def _mesh_tier_gated_denial(
 ) -> MeshResult:
     result = MeshResult(scenario_name=config.name)
     trace_id = result.trace_id
+    t0 = time.time()
 
     # ProfileAgent
     profile_msg = (
@@ -238,6 +243,7 @@ async def _mesh_tier_gated_denial(
         f"{h.agent_name}: {h.summary[:80]}"
         for h in result.degradation_chain
     ]
+    result.timing = {"pipeline_ms": round((time.time() - t0) * 1000, 1)}
     return result
 
 
@@ -250,6 +256,7 @@ async def _mesh_multi_intent(
 ) -> MeshResult:
     result = MeshResult(scenario_name=config.name)
     trace_id = result.trace_id
+    t0 = time.time()
 
     stays = profile.get("stays", [])
     lhrw_stay = next(
@@ -346,6 +353,7 @@ async def _mesh_multi_intent(
         f"{h.agent_name}: {h.summary[:80]}"
         for h in result.degradation_chain
     ]
+    result.timing = {"pipeline_ms": round((time.time() - t0) * 1000, 1)}
     return result
 
 
@@ -358,6 +366,7 @@ async def _mesh_proactive_recovery(
 ) -> MeshResult:
     result = MeshResult(scenario_name=config.name)
     trace_id = result.trace_id
+    t0 = time.time()
     stays = profile.get("stays", [])
     lhrw_stay = next(
         (s for s in stays if s.get("property_code") == "LHRW01"), stays[0]
@@ -407,6 +416,7 @@ async def _mesh_proactive_recovery(
         f"{h.agent_name}: {h.summary[:80]}"
         for h in result.degradation_chain
     ]
+    result.timing = {"pipeline_ms": round((time.time() - t0) * 1000, 1)}
     return result
 
 
@@ -419,6 +429,7 @@ async def _mesh_vip_concierge(
 ) -> MeshResult:
     result = MeshResult(scenario_name=config.name)
     trace_id = result.trace_id
+    t0 = time.time()
 
     stays = profile.get("stays", [])
     lhrw_stay = next(
@@ -528,6 +539,165 @@ async def _mesh_vip_concierge(
         f"{h.agent_name}: {h.summary[:80]}"
         for h in result.degradation_chain
     ]
+    result.timing = {"pipeline_ms": round((time.time() - t0) * 1000, 1)}
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Scenario 6 — Contradictory Intent (mesh processes independently)
+# ---------------------------------------------------------------------------
+
+async def _mesh_contradictory_intent(
+    session: ClientSession, config: ScenarioConfig, profile: dict,
+) -> MeshResult:
+    result = MeshResult(scenario_name=config.name)
+    trace_id = result.trace_id
+    t0 = time.time()
+
+    # ProfileAgent
+    profile_msg = (
+        f"Summarize this guest profile:\n{json.dumps(profile, indent=2)}\n\n"
+        f"The guest's request: {config.raw_message}"
+    )
+    profile_result = await run_agent(
+        "ProfileAgent", profile_msg, session, trace_id,
+    )
+    _record_agent(result, profile_result, "summarize_profile",
+                  {"guest_id": config.guest_id})
+
+    # CoordinatorAgent: route to reservation
+    coord_msg = (
+        f"Previous agent summary:\n{profile_result.summary}\n\n"
+        f"The guest wants a late checkout AND an early check-in on the same "
+        f"day for the same reservation. Route to the Reservation specialist. "
+        f"Summarize in 2-3 sentences."
+    )
+    coord_result = await run_agent(
+        "CoordinatorAgent", coord_msg, session, trace_id,
+    )
+    _record_agent(result, coord_result, "coordinate",
+                  {"profile_summary": profile_result.summary[:100]})
+
+    # ReservationAgent: may try both actions independently
+    stay = profile.get("current_stay") or (profile.get("stays", [{}])[0])
+    res_id = stay.get("reservation_id", "R-5001")
+    res_msg = (
+        f"Coordinator handoff:\n{coord_result.summary}\n\n"
+        f"Reservation ID: {res_id}\n"
+        f"Process the checkout and check-in requests."
+    )
+    res_result = await run_agent(
+        "ReservationAgent", res_msg, session, trace_id,
+    )
+    _record_agent(result, res_result, "checkout_checkin_request",
+                  {"coordinator_summary": coord_result.summary[:100]})
+    _collect_tool_actions(result, res_result)
+
+    # Mesh processes requests independently without detecting conflict
+    result.final_status = "Executable"
+    result.context_loss_summary = [
+        f"{h.agent_name}: {h.summary[:80]}"
+        for h in result.degradation_chain
+    ]
+    result.timing = {"pipeline_ms": round((time.time() - t0) * 1000, 1)}
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Scenario 7 — Ambiguous Escalation (mesh may over-interpret)
+# ---------------------------------------------------------------------------
+
+async def _mesh_ambiguous_escalation(
+    session: ClientSession, config: ScenarioConfig, profile: dict,
+) -> MeshResult:
+    result = MeshResult(scenario_name=config.name)
+    trace_id = result.trace_id
+    t0 = time.time()
+
+    # ProfileAgent
+    profile_msg = (
+        f"Summarize this guest profile:\n{json.dumps(profile, indent=2)}\n\n"
+        f"The guest's message: {config.raw_message}"
+    )
+    profile_result = await run_agent(
+        "ProfileAgent", profile_msg, session, trace_id,
+    )
+    _record_agent(result, profile_result, "summarize_profile",
+                  {"guest_id": config.guest_id})
+
+    # CoordinatorAgent: may over-interpret vague sentiment
+    coord_msg = (
+        f"Previous agent summary:\n{profile_result.summary}\n\n"
+        f"The guest said: '{config.raw_message}'\n"
+        f"Determine what action to take. Summarize in 2-3 sentences."
+    )
+    coord_result = await run_agent(
+        "CoordinatorAgent", coord_msg, session, trace_id,
+    )
+    _record_agent(result, coord_result, "coordinate",
+                  {"profile_summary": profile_result.summary[:100]})
+
+    # Check if coordinator suggested any actions
+    coord_lower = coord_result.summary.lower()
+    if any(w in coord_lower for w in ["escalat", "clarif", "staff", "unclear",
+                                       "vague", "no specific", "cannot determine"]):
+        result.escalation_notes.append(
+            "Ambiguous guest sentiment — requires staff clarification"
+        )
+        result.final_status = "Human_Escalation_Required"
+    else:
+        result.final_status = "Executable"
+
+    result.context_loss_summary = [
+        f"{h.agent_name}: {h.summary[:80]}"
+        for h in result.degradation_chain
+    ]
+    result.timing = {"pipeline_ms": round((time.time() - t0) * 1000, 1)}
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Scenario 8 — Mesh-Favorable Baseline (simple lookup)
+# ---------------------------------------------------------------------------
+
+async def _mesh_favorable_baseline(
+    session: ClientSession, config: ScenarioConfig, profile: dict,
+) -> MeshResult:
+    result = MeshResult(scenario_name=config.name)
+    trace_id = result.trace_id
+    t0 = time.time()
+
+    # ProfileAgent
+    profile_msg = (
+        f"Summarize this guest profile:\n{json.dumps(profile, indent=2)}\n\n"
+        f"The guest's question: {config.raw_message}"
+    )
+    profile_result = await run_agent(
+        "ProfileAgent", profile_msg, session, trace_id,
+    )
+    _record_agent(result, profile_result, "summarize_profile",
+                  {"guest_id": config.guest_id})
+
+    # CoordinatorAgent: simple routing
+    coord_msg = (
+        f"Previous agent summary:\n{profile_result.summary}\n\n"
+        f"The guest asked: '{config.raw_message}'\n"
+        f"Answer this simple informational question. "
+        f"Summarize in 2-3 sentences."
+    )
+    coord_result = await run_agent(
+        "CoordinatorAgent", coord_msg, session, trace_id,
+    )
+    _record_agent(result, coord_result, "answer_query",
+                  {"profile_summary": profile_result.summary[:100]})
+
+    # Simple query — no tool calls needed
+    result.final_status = "Executable"
+    result.context_loss_summary = [
+        f"{h.agent_name}: {h.summary[:80]}"
+        for h in result.degradation_chain
+    ]
+    result.timing = {"pipeline_ms": round((time.time() - t0) * 1000, 1)}
     return result
 
 
@@ -541,6 +711,9 @@ _MESH_HANDLERS = {
     "multi_intent_compromise": _mesh_multi_intent,
     "proactive_recovery": _mesh_proactive_recovery,
     "vip_concierge_bundle": _mesh_vip_concierge,
+    "contradictory_intent": _mesh_contradictory_intent,
+    "ambiguous_escalation": _mesh_ambiguous_escalation,
+    "mesh_favorable_baseline": _mesh_favorable_baseline,
 }
 
 
@@ -553,6 +726,8 @@ async def run_mesh_scenario(config: ScenarioConfig) -> MeshResult:
             final_status="error",
             context_loss_summary=[f"No mesh handler for scenario: {config.name}"],
         )
+
+    mesh_start = time.time()
 
     async with sse_client(MCP_GATEWAY_URL) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
@@ -567,7 +742,14 @@ async def run_mesh_scenario(config: ScenarioConfig) -> MeshResult:
             )
             guest_profile = json.loads(profile_text)
 
-            return await handler(session, config, guest_profile)
+            result = await handler(session, config, guest_profile)
+
+            # Set top-level timing if handler didn't already
+            if not result.timing:
+                result.timing = {
+                    "pipeline_ms": round((time.time() - mesh_start) * 1000, 1),
+                }
+            return result
 
 
 def build_comparison(cso_result: dict, mesh_result: MeshResult) -> dict:
@@ -636,6 +818,11 @@ def build_comparison(cso_result: dict, mesh_result: MeshResult) -> dict:
             "one intent was denied — mesh cascaded the denial to all intents"
         )
 
+    scenario_name = cso_result.get("scenario", "unknown")
+    scorecard = build_scorecard_comparison(
+        scenario_name, cso_result, mesh_result.to_dict(),
+    )
+
     return {
         "both_succeed": both_succeed,
         "cso_status": cso_result.get("status"),
@@ -653,6 +840,7 @@ def build_comparison(cso_result: dict, mesh_result: MeshResult) -> dict:
             "cso_has_voucher": cso_has_voucher,
             "mesh_has_voucher": mesh_has_voucher,
         },
+        "scorecard": scorecard,
     }
 
 

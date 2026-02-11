@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -37,6 +38,7 @@ from cso_poc.schemas import (
     DecisionBreadcrumb,
     EnvelopeStatus,
 )
+from cso_poc.scorecard import score_cso_result
 
 log = logging.getLogger("cso.scenarios")
 
@@ -139,6 +141,56 @@ SCENARIOS: dict[str, ScenarioConfig] = {
             "sub-intents in a single reasoning pass with full context."
         ),
     ),
+    "contradictory_intent": ScenarioConfig(
+        name="contradictory_intent",
+        guest_id="G-1001",
+        raw_message=(
+            "I need a late checkout at 4 PM today and also an early "
+            "check-in at 10 AM today for the same reservation R-5001."
+        ),
+        context=(
+            "Guest G-1001 (Diamond) reservation R-5001 at LHRW01. "
+            "Requests late checkout at 4 PM AND early check-in at 10 AM "
+            "on the same day for the same reservation — logically impossible. "
+            "CSO should detect the contradiction and escalate."
+        ),
+        mesh_annotation=(
+            "Mesh risk: agents process checkout and check-in independently "
+            "without detecting the logical conflict. Each specialist acts on "
+            "its own sub-task, potentially executing both contradictory actions."
+        ),
+    ),
+    "ambiguous_escalation": ScenarioConfig(
+        name="ambiguous_escalation",
+        guest_id="G-2002",
+        raw_message="This isn't what I expected at all...",
+        context=(
+            "Guest G-2002 (Gold) sends a vague complaint with no specific "
+            "actionable intent. CSO should recognise the ambiguity, avoid "
+            "hallucinating tool calls, and escalate to staff for clarification."
+        ),
+        mesh_annotation=(
+            "Mesh risk: Coordinator may over-interpret vague sentiment and "
+            "route to a specialist agent, which then hallucinate a tool call "
+            "based on the ambiguous context."
+        ),
+    ),
+    "mesh_favorable_baseline": ScenarioConfig(
+        name="mesh_favorable_baseline",
+        guest_id="G-2002",
+        raw_message="What time is checkout?",
+        context=(
+            "Simple informational query. Both CSO and mesh should handle this "
+            "equivalently — no tool calls needed, just a factual response. "
+            "This scenario demonstrates intellectual honesty: not all queries "
+            "require the CSO's full reasoning pipeline."
+        ),
+        mesh_annotation=(
+            "Both architectures handle simple informational queries equivalently. "
+            "This is the mesh's sweet spot: single-agent, no handoffs, no context "
+            "to degrade. Included for intellectual honesty in the comparison."
+        ),
+    ),
 }
 
 
@@ -159,6 +211,8 @@ async def run_scenario(config: ScenarioConfig) -> dict[str, Any]:
       8. Store in memory, populate memory blocks
       9. Return rich response
     """
+    pipeline_start = time.time()
+
     async with sse_client(MCP_GATEWAY_URL) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
@@ -333,7 +387,9 @@ async def run_scenario(config: ScenarioConfig) -> dict[str, Any]:
 
             vault = memory.vault_snapshot()
 
-            return {
+            pipeline_elapsed = (time.time() - pipeline_start) * 1000
+
+            result_dict = {
                 "scenario": config.name,
                 "trace_id": trace_id,
                 "status": status.value,
@@ -361,4 +417,10 @@ async def run_scenario(config: ScenarioConfig) -> dict[str, Any]:
                     }
                     for ca in envelope.contextual_assertions
                 ],
+                "timing": {
+                    "pipeline_ms": round(pipeline_elapsed, 1),
+                },
             }
+
+            result_dict["scorecard"] = score_cso_result(config.name, result_dict)
+            return result_dict

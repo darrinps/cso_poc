@@ -193,11 +193,15 @@ class DecisionBreadcrumb(BaseModel):
     action_taken: str
     result: str
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+    latency_ms: float = Field(default=0.0, description="Wall-clock latency of the tool call in milliseconds")
 
     def format_log_line(self) -> str:
-        return (
+        line = (
             f"[{self.trace_id}] | "
             f"[{self.policy_reference}] | "
             f"[{self.action_taken}] | "
             f"[{self.result}]"
         )
+        if self.latency_ms > 0:
+            line += f" ({self.latency_ms:.0f}ms)"
+        return line

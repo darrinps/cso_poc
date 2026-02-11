@@ -18,15 +18,17 @@ from typing import Any
 import anthropic
 from mcp import ClientSession
 
+from cso_poc.model_config import MESH_MODEL as _MESH_SPEC
+
 log = logging.getLogger("cso.mesh_agents")
 
 # ---------------------------------------------------------------------------
-# Model configuration
+# Model configuration (imported from model_config.py)
 # ---------------------------------------------------------------------------
 
-MESH_MODEL = "claude-haiku-4-5-20251001"
-MESH_TEMPERATURE = 0.2
-MESH_MAX_TOKENS = 1024
+MESH_MODEL = _MESH_SPEC.name
+MESH_TEMPERATURE = _MESH_SPEC.temperature
+MESH_MAX_TOKENS = _MESH_SPEC.max_tokens
 
 
 @dataclass
@@ -352,6 +354,7 @@ class MeshResult:
     escalation_notes: list[str] = field(default_factory=list)
     context_loss_summary: list[str] = field(default_factory=list)
     degradation_chain: list[AgentHandoff] = field(default_factory=list)
+    timing: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -363,4 +366,5 @@ class MeshResult:
             "escalation_notes": self.escalation_notes,
             "context_loss_summary": self.context_loss_summary,
             "degradation_chain": [h.to_dict() for h in self.degradation_chain],
+            "timing": self.timing,
         }

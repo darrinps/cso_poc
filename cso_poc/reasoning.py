@@ -18,9 +18,12 @@ from typing import Any
 
 import anthropic
 
+from cso_poc.model_config import get_cso_model
+
 log = logging.getLogger("cso.reasoning")
 
-ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
+_CSO_SPEC = get_cso_model()
+ANTHROPIC_MODEL = _CSO_SPEC.name
 
 SYSTEM_PROMPT = """\
 You are the reasoning core of the Cognitive Singularity Orchestrator (CSO), \
@@ -68,6 +71,17 @@ wine or spirits. Set required_tool=null and the orchestrator will escalate.
 8. **Compromise pattern**: When checkout exceeds ceiling, the orchestrator will clamp to \
 the ceiling AND issue a ComplimentaryDrinkVoucher as compensation. You just need to set \
 original_parameter_value and policy_ceiling correctly.
+9. **Contradictory intents**: If a guest's request contains logically contradictory actions \
+(e.g. late checkout AND early check-in on the same day that would overlap), set \
+required_tool=null for the conflicting sub-intents and include a description explaining \
+the contradiction. The orchestrator will escalate.
+10. **Ambiguous / vague requests**: If the guest message expresses sentiment but contains \
+no actionable intent (e.g. "This isn't what I expected"), do NOT hallucinate tool calls. \
+Return a single SubIntent with required_tool=null, domain="Escalation", and a description \
+requesting clarification. The orchestrator will escalate to staff.
+11. **Informational queries**: If the guest asks a simple informational question \
+(e.g. "What time is checkout?"), return a SubIntent with required_tool=null and \
+domain="Informational". No tool calls are needed for pure lookups.
 
 ## Extra Params Guide
 - For pms_update_reservation: include res_id, date (YYYY-MM-DD portion)
@@ -110,9 +124,9 @@ async def decompose_with_claude(
 
     try:
         response = await client.messages.create(
-            model=ANTHROPIC_MODEL,
-            max_tokens=2048,
-            temperature=0,
+            model=_CSO_SPEC.name,
+            max_tokens=_CSO_SPEC.max_tokens,
+            temperature=_CSO_SPEC.temperature,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_content}],
         )
