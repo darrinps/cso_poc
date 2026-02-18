@@ -99,6 +99,11 @@ services:
     # The dashboard is NOT on orchestration-net or backend-net.
     # It can only talk to the orchestrator's HTTP API.
 
+# Three isolated bridge networks enforce the security model at the Docker level.
+# The orchestrator cannot resolve or route to the database hostname — all writes
+# must pass through the MCP gateway's policy gates.  This is not just a logical
+# separation; it's a network-level guarantee that no code path can bypass
+# policy enforcement, regardless of bugs or misconfiguration in the orchestrator.
 networks:
   orchestration-net:
     driver: bridge

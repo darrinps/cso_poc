@@ -1,6 +1,14 @@
-# Cognitive Singularity Orchestrator — Proof of Concept
+# Cognitive Singularity Orchestrator (CSO) — Proof of Concept
 
-A 4-layer Docker stack demonstrating centralized AI reasoning vs. traditional agentic mesh architectures in a hospitality domain. The CSO processes multi-intent guest requests through a single reasoning pass (Claude), preserving full context — while the mesh simulator shows how context degrades at each agent handoff.
+## Thesis
+
+Multi-agent AI architectures lose context at every handoff. This proof of concept demonstrates a measurably better alternative: **centralized AI reasoning with deterministic execution**, where a single LLM pass preserves full request context across domains, policies, and constraints.
+
+The CSO processes complex, multi-intent guest requests through one reasoning pass (Claude Sonnet), producing a deterministic execution plan enforced through policy-gated MCP tool calls. A real Claude-powered agentic mesh (Claude Haiku agents) runs the same scenarios in parallel, providing a controlled, side-by-side comparison that quantifies the context degradation inherent in multi-agent architectures.
+
+**Key finding:** In scenarios requiring cross-domain reasoning (checkout policy + compensatory benefits + room constraints), the CSO consistently preserves context that the mesh loses at Coordinator handoffs — measurable in missed compensatory actions, incorrect room assignments, and cascaded denials.
+
+---
 
 ## Architecture
 
@@ -18,19 +26,109 @@ A 4-layer Docker stack demonstrating centralized AI reasoning vs. traditional ag
                        +------------------+
 ```
 
-- **Orchestrator** has no direct DB access — all writes go through the MCP Gateway's policy gates.
-- **Dashboard** can only talk to the Orchestrator's HTTP API.
-- **MCP Gateway** is the only service that bridges orchestration and backend networks.
+### Design Principles
 
-## Prerequisites
+| Principle | Implementation |
+|---|---|
+| **Network-enforced policy gates** | The orchestrator has no route to the database. All writes pass through the MCP gateway's policy enforcement layer. This is a Docker network-level guarantee, not a code convention. |
+| **Centralized reasoning, deterministic execution** | Claude reasons once; the orchestrator executes the resulting Canonical Intent Envelope sequentially via MCP tool calls. No agent-to-agent negotiation. |
+| **Immutable audit trail** | Every policy decision — approvals, denials, compromises, escalations — is captured as a Decision Breadcrumb with trace ID, policy reference, and timestamp. |
+| **Three-block memory with TTL decay** | Core (permanent), Tactical (48h), Transient (10min). Zombie context is scrubbed before every reasoning cycle to prevent stale facts from influencing new decisions. |
+| **Defense in depth** | Policy enforcement occurs at two levels: the CSO's reasoning engine (Cognitive Fallback) and the MCP gateway (database-level constraints). |
+
+### Layer Architecture
+
+| Layer | Component | Responsibility |
+|---|---|---|
+| **Layer 2** | Streamlit Dashboard | Executive demo UI with memory vault visualization and live breadcrumb feed |
+| **Layer 4** | CSO Orchestrator (FastAPI) | Claude reasoning, Cognitive Fallback, envelope execution, memory management |
+| **Layer 5** | MCP Gateway (FastMCP/SSE) | Tool-level policy enforcement, Decision Breadcrumb logging, database mutations |
+| **Layer 6** | Decision Breadcrumbs | Immutable audit records for every tool call (cross-cutting via decorator) |
+| **Layer 7** | Postgres 16 | System of record — guest profiles, stays, room inventory, allocated benefits |
+
+---
+
+## The CSO Pipeline
+
+Each guest request passes through five phases:
+
+```
+Phase 0: SCRUB      →  Purge expired memory facts (prevent zombie context)
+Phase 1: DECOMPOSE  →  Claude decomposes request into structured sub-intents
+Phase 2: REASON     →  Cognitive Fallback cascade: no-tool → tier-gate → ceiling → execute
+Phase 3: EXECUTE    →  Dispatch Canonical Intent Envelope via MCP tool calls
+Phase 4: MEMORIZE   →  Store facts in core/tactical/transient blocks, expire transient state
+```
+
+### Cognitive Fallback Cascade
+
+When a sub-intent cannot be fulfilled as requested, the CSO applies a priority-ordered fallback:
+
+1. **No MCP tool exists** (e.g., wine delivery) → Escalate to human staff
+2. **Tier gate violation** (e.g., Gold guest requesting Diamond benefit) → Deny + escalate
+3. **Policy ceiling exceeded** (e.g., 5 PM checkout when max is 4 PM) → Clamp to ceiling + issue compensatory benefit
+4. **All within policy** → Execute normally
+
+Each branch produces a structured audit trail, making every outcome explainable and reviewable.
+
+---
+
+## CSO vs. Agentic Mesh Comparison
+
+The mesh pipeline uses **real Claude Haiku agents** (not hardcoded simulations) that communicate through text summaries. Context degrades naturally because each Coordinator handoff compresses the previous agent's output to 2-3 sentences.
+
+### Agent Chains by Scenario
+
+| Scenario | Mesh Agent Chain | Expected Degradation |
+|---|---|---|
+| Single Benefit | Profile → Coord → Loyalty (3 agents) | None — control case |
+| Tier-Gated Denial | Profile → Coord → Reservation → Coord → Loyalty (5 agents) | Coordinator interprets denial as blanket rejection, drops breakfast |
+| Multi-Intent Compromise | Profile → Coord → Res → Coord → Loyalty → Coord (6 agents) | Coordinator reports "4PM confirmed" without mentioning 5PM was denied; no voucher |
+| Proactive Recovery | Profile → Coord → Rooms (3 agents) | Pet details (breed, weight, near_exit) compressed out of handoff |
+| VIP Concierge Bundle | Profile → Coord → Res → Coord → Rooms → Coord → Loyalty (7 agents) | 3 Coordinator compressions; voucher almost always lost, room constraints may degrade |
+| Contradictory Intent | Profile → Coord → Reservation (3 agents) | Agents process contradictory requests independently without detecting conflict |
+| Ambiguous Escalation | Profile → Coord (2 agents) | Coordinator may over-interpret vague sentiment |
+| Mesh-Favorable Baseline | Profile → Coord (2 agents) | None — included for intellectual honesty |
+
+### Quantitative Scoring
+
+Both pipelines are scored against predefined criteria using a weighted multi-dimensional scorecard:
+
+| Dimension | Weight | What It Measures |
+|---|---|---|
+| Intent Detection | 25% | Did the system identify all sub-intents in the request? |
+| Tool Accuracy | 35% | Did it call the correct MCP tools with correct parameters? |
+| Escalation Accuracy | 20% | Did it correctly flag unresolvable items for human staff? |
+| Compromise Detection | 20% | Did it detect policy gaps and issue compensatory benefits? |
+
+Policy violations are penalized as deductions, ensuring errors are never masked by high sub-scores.
+
+---
+
+## Technology Stack
+
+| Component | Technology | Rationale |
+|---|---|---|
+| **CSO Reasoning** | Claude Sonnet 4 (temp=0) | Deterministic single-pass decomposition with deep policy reasoning |
+| **Mesh Agents** | Claude Haiku 4.5 (temp=0.2) | Realistic small specialist agents with natural variation |
+| **Orchestrator API** | FastAPI + Uvicorn | Async HTTP with embedded single-page scenario runner UI |
+| **MCP Gateway** | FastMCP (SSE transport) | Anthropic's Model Context Protocol for tool execution with policy enforcement |
+| **Database** | Postgres 16 (Alpine) | ACID guarantees for guest data, idempotent benefit allocation via UNIQUE constraints |
+| **Dashboard** | Streamlit | Rapid prototyping for memory vault visualization and breadcrumb feeds |
+| **Test Framework** | pytest + httpx | Integration tests against live Docker stack with structural assertions |
+| **Containerization** | Docker Compose v2 | Three isolated bridge networks enforce write-path security at the infrastructure level |
+
+---
+
+## Getting Started
+
+### Prerequisites
 
 - **Docker Desktop** (with Docker Compose v2)
 - **Python 3.11+** (for running tests locally)
-- **Anthropic API key** (Claude powers the sub-intent decomposition)
+- **Anthropic API key** (Claude powers both CSO reasoning and mesh agents)
 
-## Step 1: Set Your API Key
-
-Create a `.env` file in the project root (if one does not already exist):
+### 1. Set Your API Key
 
 ```bash
 echo ANTHROPIC_API_KEY=sk-ant-your-key-here > .env
@@ -38,9 +136,7 @@ echo ANTHROPIC_API_KEY=sk-ant-your-key-here > .env
 
 Docker Compose reads this file automatically and passes the key to the orchestrator container.
 
-## Step 2: Build and Start the Stack
-
-From the project root directory:
+### 2. Build and Start the Stack
 
 ```bash
 docker compose up -d --build
@@ -55,364 +151,233 @@ This builds three images and starts four containers:
 | `cso-orchestrator` | `localhost:9001` | FastAPI — Claude reasoning + mesh comparison |
 | `cso-dashboard` | `localhost:9501` | Streamlit UI — multi-turn chat demo |
 
-## Step 3: Verify the Stack Is Running
-
-Check that all four containers are healthy:
+### 3. Verify Health
 
 ```bash
 docker compose ps
-```
-
-You should see all four services with status `Up`. Then confirm the orchestrator API responds:
-
-```bash
 curl http://localhost:9001/health
+# Expected: {"status":"ok","turns_processed":0}
 ```
 
-Expected response:
+If the health check fails, wait 10 seconds — services start in dependency order (Postgres → MCP Gateway → Orchestrator → Dashboard).
 
-```json
-{"status":"ok","turns_processed":0}
-```
+### 4. Open the UI
 
-If the health check fails, wait 10 seconds and retry — the MCP gateway needs the Postgres healthcheck to pass before it starts, and the orchestrator needs the gateway.
+- **Scenario Runner:** [http://localhost:9001](http://localhost:9001) — Eight scenario buttons with side-by-side CSO vs. mesh comparison and quantitative scorecard
+- **Streamlit Dashboard:** [http://localhost:9501](http://localhost:9501) — Multi-turn chat with live breadcrumb feed and memory vault inspector
 
-## Step 4: Open the UI
+---
 
-Open your browser to:
+## Running Tests
 
-- **Scenario Runner (FastAPI):** [http://localhost:9001](http://localhost:9001)
-- **Streamlit Dashboard:** [http://localhost:9501](http://localhost:9501)
-
-The Scenario Runner at port 9001 has five preset scenario buttons and a "Compare with Mesh" button under each one. Click any Compare button to see a side-by-side split view of CSO vs. mesh results with a scorecard.
-
-## Step 5: Install Test Dependencies
-
-Tests run on your host machine against the live Docker stack. Install the project and test dependencies:
+### Install Test Dependencies
 
 ```bash
 pip install -e ".[dev]"
 ```
 
-This installs `pytest`, `httpx`, and all project dependencies locally.
-
-## Step 6: Run the Tests
-
-### Run all CSO scenario tests (existing + comparison):
+### Run Tests
 
 ```bash
+# All CSO scenario tests + comparison tests
 pytest tests/test_scenarios.py -v
-```
 
-### Run mesh-only tests:
-
-```bash
+# Mesh agent pipeline tests
 pytest tests/test_mesh.py -v
-```
 
-### Run all tests at once:
-
-```bash
+# Everything
 pytest tests/ -v
 ```
 
-### Important notes about tests:
+### Test Design Philosophy
 
-- Tests require the Docker stack to be running (`docker compose up -d --build`).
-- Tests hit the live orchestrator at `http://localhost:9001`.
-- Each test automatically resets orchestrator memory and database state via `POST /reset` before running.
-- Both CSO and mesh tests call Claude's API (requires a valid `ANTHROPIC_API_KEY`), so they incur API usage. CSO uses Sonnet for decomposition; the mesh uses Haiku for each agent in the chain.
-- Comparison tests run both CSO and mesh sequentially with a DB reset between them, so they take roughly twice as long per scenario.
-- Test timeout is 180 seconds per request (300 seconds for comparisons).
-- **CSO assertions are strict** — the CSO pipeline is deterministic once Claude produces sub-intents, so we check exact tool names, room numbers, benefit types, and policy references.
-- **Mesh assertions are loosened** — real Haiku agents are non-deterministic, so mesh tests check structural properties (has actions, has checkout, has SNA) rather than exact values. Some mesh checks are informational-only (logged but not asserted).
+- **Integration tests against live Docker stack** — validates the full pipeline (Claude → MCP → Postgres) end-to-end
+- **Autouse reset fixture** — every test gets clean memory and database state via `POST /reset`
+- **CSO assertions are strict** — deterministic pipeline (temp=0) allows exact checks on tool names, room numbers, benefit types
+- **Mesh assertions are loosened** — real Haiku agents (temp=0.2) are non-deterministic; tests check structural properties, not exact values
+- **Informational-only mesh checks** — some observations are logged but not asserted, preventing flaky tests while preserving evidence
+- **Timeouts:** 180s per scenario, 300s for comparisons (real Claude API calls)
 
 ---
 
 ## Test Reference
 
-### `tests/test_scenarios.py` — CSO Pipeline Tests
+### CSO Pipeline Tests (`tests/test_scenarios.py`)
 
-These tests validate that the CSO's single-pass reasoning pipeline correctly decomposes, reasons about, and executes guest requests. All assertions are strict.
+Tests validate that the CSO's single-pass reasoning correctly decomposes, reasons about, and executes guest requests. All assertions are strict.
 
-#### Scenario 1: Single Benefit Allocation (`TestScenario1SingleBenefit`)
+#### Scenario 1: Single Benefit (`TestScenario1SingleBenefit`)
 
-**Setup:** Guest G-2002 (Gold tier) asks for a complimentary breakfast.
+**Guest G-2002 (Gold)** asks for complimentary breakfast. Baseline scenario — single intent, no policy conflicts.
 
-This is the simplest scenario — a single intent with no policy conflicts. It serves as a baseline to confirm the pipeline works end-to-end.
-
-| Test | What it checks |
+| Test | Assertion |
 |---|---|
-| `test_status_executable` | Envelope status is `Executable` (no compromises or escalations) |
+| `test_status_executable` | Envelope status is `Executable` |
 | `test_single_action` | Exactly 1 action produced |
-| `test_action_is_loyalty_allocate` | The action calls `loyalty_allocate_benefit` |
+| `test_action_is_loyalty_allocate` | Action calls `loyalty_allocate_benefit` |
 | `test_benefit_type_breakfast` | Benefit type is `ComplimentaryBreakfast` |
-| `test_no_escalations` | No escalation notes generated |
+| `test_no_escalations` | No escalation notes |
 | `test_no_compromises` | No actions flagged as compromises |
 
-#### Scenario 2: Tier-Gated Denial + Valid Benefit (`TestScenario2TierGatedDenial`)
+#### Scenario 2: Tier-Gated Denial (`TestScenario2TierGatedDenial`)
 
-**Setup:** Guest G-2002 (Gold tier) asks for a late checkout at 3 PM AND complimentary breakfast.
+**Guest G-2002 (Gold)** asks for late checkout at 3 PM AND breakfast. CSO denies checkout (Gold can't extend past 11 AM) while independently fulfilling the breakfast request.
 
-Tests that the CSO correctly denies the checkout (Gold tier doesn't qualify for late checkout — requires Diamond or Titanium) while still fulfilling the independent breakfast request. This is where the CSO's ability to treat each sub-intent independently matters.
-
-| Test | What it checks |
+| Test | Assertion |
 |---|---|
-| `test_status_includes_escalation` | Status is `Human_Escalation_Required` or `Partial_Fulfillment` |
-| `test_breakfast_allocated` | Breakfast was allocated despite checkout denial |
-| `test_late_checkout_denied_or_escalated` | Checkout denial appears in escalation notes, contextual assertions, or sub-intent tier violations |
-| `test_mesh_annotation_present` | Mesh comparison annotation is populated |
+| `test_status_includes_escalation` | `Human_Escalation_Required` or `Partial_Fulfillment` |
+| `test_breakfast_allocated` | Breakfast allocated despite checkout denial |
+| `test_late_checkout_denied_or_escalated` | Denial in escalation notes, assertions, or sub-intent violations |
+| `test_mesh_annotation_present` | Mesh comparison annotation populated |
 
-#### Scenario 3: Multi-Intent Compromise + Escalation (`TestScenario3MultiIntentCompromise`)
+#### Scenario 3: Multi-Intent Compromise (`TestScenario3MultiIntentCompromise`)
 
-**Setup:** Guest G-1001 (Diamond tier) asks for a 5 PM checkout, Suite Night Award, and a bottle of Chateau Margaux.
+**Guest G-1001 (Diamond)** asks for 5 PM checkout, Suite Night Award, and Chateau Margaux. CSO clamps checkout to 4 PM, issues compensatory drink voucher, allocates SNA, and escalates wine to staff.
 
-The most complex reasoning test: the 5 PM checkout exceeds the Diamond policy ceiling of 4 PM, so the CSO must clamp to 4 PM and issue a compensatory drink voucher. The wine request has no MCP tool, so it must be escalated to staff. The SNA should be allocated normally.
-
-| Test | What it checks |
+| Test | Assertion |
 |---|---|
-| `test_status_human_escalation` | Status is `Human_Escalation_Required` (wine needs staff) |
-| `test_checkout_clamped_to_4pm` | Checkout time contains `T16:00` (clamped from 17:00) |
-| `test_drink_voucher_compromise` | A `ComplimentaryDrinkVoucher` was issued and flagged as a compromise |
-| `test_suite_night_award_allocated` | SNA was allocated normally |
-| `test_wine_escalated` | Wine/Margaux/Provisions appears in escalation notes or contextual assertions |
-| `test_compromise_breadcrumbs` | At least one decision breadcrumb references `COMPROMISE` or `CEILING` |
+| `test_status_human_escalation` | `Human_Escalation_Required` (wine needs staff) |
+| `test_checkout_clamped_to_4pm` | Checkout contains `T16:00` |
+| `test_drink_voucher_compromise` | `ComplimentaryDrinkVoucher` issued, flagged as compromise |
+| `test_suite_night_award_allocated` | SNA allocated normally |
+| `test_wine_escalated` | Wine/Margaux in escalation notes or assertions |
+| `test_compromise_breadcrumbs` | Breadcrumb references `COMPROMISE` or `CEILING` |
 
-#### Scenario 4: Proactive Cross-Domain Recovery (`TestScenario4ProactiveRecovery`)
+#### Scenario 4: Proactive Recovery (`TestScenario4ProactiveRecovery`)
 
-**Setup:** Guest G-3003 (Titanium tier) has 2 Cane Corso dogs (225 lbs total). Flight delayed +3 hours, arriving at 1 AM instead of 10 PM. Current room 1415 on floor 14.
+**Guest G-3003 (Titanium)** with 2 Cane Corso dogs (225 lbs). Flight delayed +3h, arriving 1 AM. CSO proactively reassigns from floor 14 to ground-floor pet-friendly suite near exit.
 
-Tests proactive reasoning: the CSO detects that a high-floor room is unsuitable for a 1 AM arrival with large dogs, queries for ground-floor pet-friendly suites near the exit, and reassigns to room 101.
-
-| Test | What it checks |
+| Test | Assertion |
 |---|---|
-| `test_status_partial_fulfillment` | Status is `Partial_Fulfillment` or `Executable` |
-| `test_room_query_executed` | A `pms_query_rooms` action was executed |
-| `test_reassigned_to_room_101` | Guest was reassigned to room `101` |
-| `test_old_room_was_1415` | The old room in the reassignment was `1415` |
-| `test_core_memory_has_pet_facts` | Core memory block contains pet/dog/Cane Corso facts |
-| `test_mesh_annotation_explains_telephone_game` | Mesh annotation mentions "telephone" or "context" degradation |
+| `test_status_partial_fulfillment` | `Partial_Fulfillment` or `Executable` |
+| `test_room_query_executed` | `pms_query_rooms` executed |
+| `test_reassigned_to_room_101` | Reassigned to room `101` |
+| `test_old_room_was_1415` | Old room was `1415` |
+| `test_core_memory_has_pet_facts` | Core memory contains pet/dog/Cane Corso facts |
+| `test_mesh_annotation_explains_telephone_game` | Annotation mentions context degradation |
 
 #### Scenario 5: VIP Concierge Bundle (`TestScenario5VIPConciergeBundle`)
 
-**Setup:** Guest G-1001 (Diamond tier) at LHRW01, room 1412. Requests: extend checkout to 5 PM, move to a ground-floor pet-friendly suite near the exit for a visiting service dog, apply Suite Night Award, and add complimentary breakfast.
+**Guest G-1001 (Diamond)** requests checkout extension, room change for visiting service dog, Suite Night Award, and breakfast. The hardest scenario — 6 actions in one pass.
 
-The hardest scenario — combines all CSO capabilities in a single request: policy ceiling compromise (checkout), two-phase room handling (query then reassign), and multiple benefit allocations. The CSO must produce 6 actions in one reasoning pass.
-
-| Test | What it checks |
+| Test | Assertion |
 |---|---|
-| `test_status_partial_or_escalation` | Status is `Partial_Fulfillment`, `Human_Escalation_Required`, or `Executable` |
 | `test_checkout_clamped_to_4pm` | Checkout clamped to `T16:00` |
-| `test_drink_voucher_compromise` | `ComplimentaryDrinkVoucher` issued as compensation |
+| `test_drink_voucher_compromise` | Compensatory voucher issued |
 | `test_suite_night_award` | SNA allocated |
-| `test_breakfast_allocated` | `ComplimentaryBreakfast` allocated |
-| `test_room_query_executed` | `pms_query_rooms` was executed |
-| `test_reassigned_to_room_101` | Guest reassigned to room `101` |
+| `test_breakfast_allocated` | Breakfast allocated |
+| `test_room_query_executed` | Room query executed |
+| `test_reassigned_to_room_101` | Reassigned to room `101` |
 
-### `tests/test_scenarios.py` — CSO vs Mesh Comparison Tests
+#### Scenarios 6-8: Adversarial and Control Cases
 
-These tests run both pipelines back-to-back with a DB reset in between, then validate the structural comparison.
+| Scenario | Key Test | What It Proves |
+|---|---|---|
+| **Contradictory Intent** — late checkout + early check-in same day | `test_no_conflicting_actions_executed` | CSO detects logical contradiction; mesh processes independently |
+| **Ambiguous Escalation** — vague complaint with no actionable intent | `test_no_hallucinated_actions` | CSO escalates to staff; mesh may hallucinate tool calls |
+| **Mesh-Favorable Baseline** — "What time is checkout?" | `test_no_mutation_tools_called` | Both architectures handle simple queries equivalently (intellectual honesty) |
 
-#### Comparison 1: Single Benefit (`TestComparison1SingleBenefit`)
+### CSO vs. Mesh Comparison Tests (`tests/test_scenarios.py`)
 
-Control case. Both CSO and mesh should handle a simple breakfast allocation identically.
+| Comparison | Key Assertion | CSO Advantage |
+|---|---|---|
+| **Single Benefit** | `both_succeed: true` | None — control case |
+| **Tier-Gated Denial** | `cso_action_count >= mesh_action_count` | CSO preserves independent intents |
+| **Multi-Intent** | `cso_has_voucher: true` | CSO issues compensatory drink voucher |
+| **Proactive Recovery** | `cso_room: "101"` | CSO preserves all constraint parameters |
+| **VIP Bundle** | `cso_has_voucher + cso_room: "101"` | CSO handles 5 sub-intents in one pass |
 
-| Test | What it checks |
-|---|---|
-| `test_both_succeed` | Comparison reports `both_succeed: true` |
-| `test_same_action_counts` | CSO and mesh have identical action counts |
+### Mesh Agent Pipeline Tests (`tests/test_mesh.py`)
 
-#### Comparison 2: Tier-Gated Denial (`TestComparison2TierGatedDenial`)
+Validates real Haiku-powered agents produce structurally sound results. Assertions are loosened for non-determinism; some checks are informational-only.
 
-The mesh may cascade the checkout denial to all intents, losing the breakfast. CSO preserves independent intents.
-
-| Test | What it checks |
-|---|---|
-| `test_cso_outperforms_or_matches_mesh` | CSO action count >= mesh action count |
-
-#### Comparison 3: Multi-Intent Compromise (`TestComparison3MultiIntent`)
-
-The mesh's Coordinator compresses the Reservation Agent's "4 PM confirmed" without mentioning the original 5 PM denial, so the Loyalty Agent never issues the compensatory drink voucher.
-
-| Test | What it checks |
-|---|---|
-| `test_cso_has_voucher` | CSO issued a `ComplimentaryDrinkVoucher` |
-
-#### Comparison 4: Proactive Recovery (`TestComparison4ProactiveRecovery`)
-
-The mesh's Coordinator compresses pet details (breed, weight, count), so the Rooms Agent may query with incomplete constraints and assign the wrong room.
-
-| Test | What it checks |
-|---|---|
-| `test_cso_assigns_101` | CSO assigned room `101` |
-
-#### Comparison 5: VIP Concierge Bundle (`TestComparison5VIPConciergeBundle`)
-
-The 7-agent mesh chain has 3 Coordinator compressions. The voucher context is almost always lost, and room constraints may degrade.
-
-| Test | What it checks |
-|---|---|
-| `test_cso_has_voucher` | CSO issued a `ComplimentaryDrinkVoucher` |
-| `test_cso_assigns_101` | CSO assigned room `101` |
-| `test_cso_outperforms_or_matches_mesh` | CSO action count >= mesh action count |
+| Test Class | Agent Chain | Key Checks |
+|---|---|---|
+| `TestMeshScenario1` | 3 agents | Has breakfast, status Executable |
+| `TestMeshScenario2` | 5 agents | Successful actions <= CSO count |
+| `TestMeshScenario3` | 6 agents | Has checkout + SNA; voucher logged but not asserted |
+| `TestMeshScenario4` | 3 agents | Has room reassignment (any room); CSO room 101 strict |
+| `TestMeshScenario5` | 7 agents | At least 5 degradation entries; CSO has 5+ actions |
+| `TestMesh6-8` | 2-3 agents | Structure validation, degradation chain populated |
 
 ---
 
-### `tests/test_mesh.py` — Mesh Agent Pipeline Tests
+## API Reference
 
-These tests validate that the real Claude Haiku-powered mesh agents produce structurally sound results. Because agents are non-deterministic, mesh assertions are loosened — they check structural properties rather than exact values. Some checks are informational-only (logged but not asserted).
+### Core Endpoints
 
-#### Mesh Scenario 1: Single Benefit (`TestMeshScenario1`)
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Health check with turn count |
+| `POST` | `/reset` | Reset memory + database to seed state |
+| `POST` | `/scenario/{name}` | Run CSO pipeline for named scenario |
+| `POST` | `/scenario/{name}/mesh` | Run mesh pipeline only |
+| `POST` | `/scenario/{name}/compare` | Side-by-side CSO vs. mesh comparison |
+| `GET` | `/breadcrumbs` | Fetch Decision Breadcrumbs |
+| `GET` | `/memory-vault` | Three-block memory state with TTL data |
 
-Control case: the 3-agent chain (Profile → Coordinator → Loyalty) should succeed just like CSO.
-
-| Test | What it checks |
-|---|---|
-| `test_mesh_has_actions` | Mesh produced at least 1 action |
-| `test_mesh_has_breakfast` | Mesh allocated `ComplimentaryBreakfast` |
-| `test_mesh_status_executable` | Mesh status is `Executable` |
-| `test_both_succeed` | Comparison reports both pipelines succeeded |
-| `test_degradation_chain_has_entries` | Agent handoff chain is populated |
-
-#### Mesh Scenario 2: Tier-Gated Denial (`TestMeshScenario2`)
-
-The 5-agent chain (Profile → Coordinator → Reservation → Coordinator → Loyalty) may cascade the checkout denial to all intents.
-
-| Test | What it checks |
-|---|---|
-| `test_mesh_has_fewer_or_equal_actions` | Mesh successful actions <= CSO action count |
-| `test_cso_has_breakfast` | CSO preserved breakfast (strict) |
-| `test_cso_status_not_rejected` | CSO was not fully rejected |
-| `test_degradation_chain_has_entries` | Agent handoff chain is populated |
-| `test_context_loss_documented` | Context loss summary is populated |
-
-#### Mesh Scenario 3: Multi-Intent Compromise (`TestMeshScenario3`)
-
-The 6-agent chain should get checkout and SNA, but likely loses the drink voucher because the Coordinator compresses "4 PM confirmed" without mentioning the original 5 PM denial.
-
-| Test | What it checks |
-|---|---|
-| `test_mesh_has_checkout` | Mesh has a `pms_update_reservation` action |
-| `test_mesh_has_sna` | Mesh allocated a `SuiteNightAward` |
-| `test_cso_has_voucher` | CSO has `ComplimentaryDrinkVoucher` (strict) |
-| `test_mesh_voucher_informational` | Logs whether mesh also got the voucher (not asserted) |
-| `test_comparison_cso_has_voucher` | Comparison reports CSO has voucher |
-| `test_degradation_chain_has_entries` | Agent handoff chain is populated |
-
-#### Mesh Scenario 4: Proactive Recovery (`TestMeshScenario4`)
-
-The 3-agent chain (Profile → Coordinator → Rooms) should reassign a room, but the Coordinator's lossy compression of pet details may cause the Rooms Agent to use incomplete query constraints.
-
-| Test | What it checks |
-|---|---|
-| `test_mesh_assigns_some_room` | Mesh has a `pms_reassign_room` with a room number (any room) |
-| `test_cso_assigns_room_101` | CSO assigned room `101` (strict) |
-| `test_degradation_chain_has_entries` | Agent handoff chain is populated |
-| `test_cso_room_informational` | Logs CSO vs mesh room numbers (not asserted) |
-
-#### Mesh Scenario 5: VIP Concierge Bundle (`TestMeshScenario5`)
-
-The 7-agent chain (Profile → Coordinator → Reservation → Coordinator → Rooms → Coordinator → Loyalty) is the hardest stress test. Three Coordinator compressions means significant context loss. The drink voucher is almost always lost, and room constraints may degrade.
-
-| Test | What it checks |
-|---|---|
-| `test_mesh_has_actions` | Mesh produced at least 2 actions (checkout + SNA minimum) |
-| `test_mesh_has_checkout` | Mesh has a `pms_update_reservation` action |
-| `test_mesh_has_sna` | Mesh allocated a `SuiteNightAward` |
-| `test_mesh_voucher_informational` | Logs whether mesh got the drink voucher (not asserted) |
-| `test_mesh_room_informational` | Logs which room mesh assigned (not asserted) |
-| `test_degradation_chain_has_entries` | 7-agent chain has at least 5 degradation entries |
-| `test_cso_has_all_six_actions` | CSO produced at least 5 actions (strict) |
-
-#### Comparison Structure (`TestComparisonStructure`)
-
-Validates the comparison response dict has all required fields regardless of scenario content.
-
-| Test | What it checks |
-|---|---|
-| `test_has_cso_key` | Response contains `cso` key |
-| `test_has_mesh_key` | Response contains `mesh` key |
-| `test_has_comparison_key` | Response contains `comparison` key |
-| `test_comparison_has_required_fields` | Comparison has `both_succeed`, `cso_status`, `mesh_status`, `action_diff`, `context_lost`, `cso_advantage` |
-| `test_mesh_has_required_fields` | Mesh result has `scenario_name`, `trace_id`, `steps`, `final_actions`, `final_status`, `degradation_chain` |
-
-## Step 7: Test via API (Optional)
-
-You can also exercise the endpoints directly with `curl`:
-
-### Run a single CSO scenario:
-
-```bash
-curl -X POST http://localhost:9001/scenario/single_benefit
-```
-
-### Run the mesh simulator alone:
-
-```bash
-curl -X POST http://localhost:9001/scenario/proactive_recovery/mesh
-```
-
-### Run a side-by-side comparison (CSO vs. mesh):
-
-```bash
-curl -X POST http://localhost:9001/scenario/proactive_recovery/compare
-```
-
-### Reset state between manual runs:
-
-```bash
-curl -X POST http://localhost:9001/reset
-```
-
-### Available scenario names:
+### Available Scenarios
 
 | Name | Guest | Description |
 |---|---|---|
 | `single_benefit` | G-2002 (Gold) | Complimentary breakfast |
 | `tier_gated_denial` | G-2002 (Gold) | Late checkout denied + breakfast allocated |
-| `multi_intent_compromise` | G-1001 (Diamond) | 5PM checkout clamped to 4PM + drink voucher + wine escalated |
+| `multi_intent_compromise` | G-1001 (Diamond) | 5PM checkout clamped + drink voucher + wine escalated |
 | `proactive_recovery` | G-3003 (Titanium) | Flight delay + 2 dogs + room reassignment |
-| `vip_concierge_bundle` | G-1001 (Diamond) | 5PM checkout + room change + SNA + breakfast (7-agent mesh stress test) |
+| `vip_concierge_bundle` | G-1001 (Diamond) | All capabilities combined (7-agent mesh stress test) |
+| `contradictory_intent` | G-1001 (Diamond) | Logically impossible request — contradiction detection |
+| `ambiguous_escalation` | G-2002 (Gold) | Vague complaint — no hallucinated actions |
+| `mesh_favorable_baseline` | G-2002 (Gold) | Simple lookup — both architectures equivalent |
 
-## Stopping the Stack
+---
+
+## Operations
+
+### Stopping the Stack
 
 ```bash
-docker compose down
+docker compose down        # Stop containers, preserve data
+docker compose down -v     # Stop containers + remove Postgres volume (full reset)
 ```
 
-To also remove the Postgres data volume (full reset of seed data):
-
-```bash
-docker compose down -v
-```
-
-## Rebuilding After Code Changes
-
-Any changes to files in `cso_poc/` require a rebuild:
+### Rebuilding After Code Changes
 
 ```bash
 docker compose up -d --build
 ```
 
-## Troubleshooting
+### Troubleshooting
 
-**Container exits immediately:**
-Check logs for the failing service:
+| Symptom | Resolution |
+|---|---|
+| Container exits immediately | `docker compose logs cso-orchestrator` / `docker compose logs mcp-hospitality-gateway` |
+| Tests fail with connection errors | Verify stack is running: `docker compose ps`, then `curl http://localhost:9001/health` |
+| "Duplicate benefit" / stale state | `curl -X POST http://localhost:9001/reset` (autouse fixture should handle this) |
+| Claude API errors (401/429) | Verify key: `docker compose exec cso-orchestrator printenv ANTHROPIC_API_KEY` |
 
-```bash
-docker compose logs cso-orchestrator
-docker compose logs mcp-hospitality-gateway
+---
+
+## Project Structure
+
 ```
-
-**Tests fail with connection errors:**
-The stack isn't running or hasn't finished starting. Run `docker compose ps` to verify all containers show `Up`, then check `curl http://localhost:9001/health`.
-
-**Tests fail with "duplicate benefit" or stale state:**
-The `reset_state` fixture should handle this automatically. If running manually, call `curl -X POST http://localhost:9001/reset` before each test.
-
-**Claude API errors (401/429):**
-Verify your `ANTHROPIC_API_KEY` is set correctly in `.env` and the orchestrator container can see it:
-
-```bash
-docker compose exec cso-orchestrator printenv ANTHROPIC_API_KEY
+cso_poc/
+  model_config.py     Centralized model version pinning (Sonnet for CSO, Haiku for mesh)
+  schemas.py          Canonical Intent Envelope, ProposedAction, Decision Breadcrumb
+  memory.py           Three-block memory with TTL decay (core/tactical/transient)
+  reasoning.py        Claude decomposition engine with policy-encoded system prompt
+  orchestrator.py     FastAPI app — Cognitive Fallback, envelope execution, embedded UI
+  mcp_server.py       MCP gateway — policy enforcement, breadcrumb decorator, DB mutations
+  mesh_agents.py      Haiku agent infrastructure — tool-use loop, agent prompts, handoffs
+  mesh.py             Agent chain pipelines per scenario, structural comparison builder
+  scenarios.py        8 scenario configs + run_scenario pipeline with two-phase room handling
+  scorecard.py        Weighted multi-dimensional scoring (intent/tool/escalation/compromise)
+  dashboard.py        Streamlit UI — chat, breadcrumb feed, memory vault inspector
+  db.py               Async Postgres connection pool (singleton, lazy initialization)
+tests/
+  conftest.py         Fixtures: session client, autouse reset, helper functions
+  test_scenarios.py   CSO pipeline tests (strict) + comparison tests
+  test_mesh.py        Mesh agent tests (loosened) + structural validation
+db/
+  init.sql            Schema + seed data (3 guests, 4 stays, 6 rooms)
+docker-compose.yml    4 services, 3 networks, health checks
 ```

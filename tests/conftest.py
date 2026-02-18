@@ -3,6 +3,23 @@ Test fixtures for CSO scenario tests.
 
 Requires the Docker stack to be running:
     docker compose up -d --build
+
+Architectural Decision: Integration tests against live Docker stack
+  Tests hit the real orchestrator over HTTP rather than mocking MCP calls.
+  This validates the full pipeline (Claude → MCP → Postgres) end-to-end,
+  catching integration issues that unit tests would miss (network timeouts,
+  policy enforcement at the gateway, database constraint violations).
+
+Architectural Decision: Autouse reset fixture
+  Every test gets a clean slate: memory cleared, database reset to seed
+  state, allocated_benefits table truncated.  This prevents state leakage
+  between tests (e.g., a duplicate-benefit rejection because a previous
+  test already allocated the same benefit).
+
+Architectural Decision: High timeouts (180s / 300s)
+  Each scenario involves real Claude API calls (Sonnet for CSO, Haiku for
+  mesh agents).  Comparison tests run both pipelines sequentially with a
+  DB reset between them, so they need roughly 2x the single-scenario timeout.
 """
 
 import os
@@ -18,7 +35,7 @@ def base_url():
 
 @pytest.fixture(scope="session")
 def client(base_url):
-    """Synchronous httpx client for the orchestrator API."""
+    """Session-scoped client reuses the TCP connection across all tests."""
     with httpx.Client(base_url=base_url, timeout=180.0) as c:
         yield c
 

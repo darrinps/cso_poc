@@ -43,6 +43,13 @@ from cso_poc.schemas import CanonicalIntentEnvelope, DecisionBreadcrumb
 # Memory fact model
 # ---------------------------------------------------------------------------
 
+# Three tiers rather than flat storage because different facts have
+# fundamentally different lifecycles:
+#   - Core: "Guest is Diamond tier" never changes mid-session
+#   - Tactical: "Checkout was clamped to 4PM" matters for 48h, then ages out
+#   - Transient: "Guest sounds frustrated" is relevant only during active reasoning
+# A flat store with no TTL would accumulate stale context that pollutes
+# future reasoning passes — the zombie context problem.
 class MemoryTier(str, Enum):
     CORE = "core"
     TACTICAL = "tactical"
@@ -88,7 +95,9 @@ class MemoryFact:
         }
 
 
-# Default TTLs
+# Default TTLs: 48 hours for tactical facts bridges multiple guest interactions
+# within a single stay.  10 minutes for transient state ensures sentiment and
+# working hypotheses don't bleed across unrelated requests.
 TACTICAL_TTL = timedelta(hours=48)
 TRANSIENT_TTL = timedelta(minutes=10)
 
@@ -160,7 +169,14 @@ class MemoryManager:
         self._scrub_log: list[dict] = []   # audit trail of decayed facts
 
     def reset(self) -> None:
-        """Clear all memory state."""
+        """
+        Clear all memory state.
+
+        Uses .clear() on each list rather than reassigning to new lists.
+        This is critical because scenarios.py imports the memory object
+        by reference — reassignment would leave the imported reference
+        pointing at the old (now-disconnected) lists.
+        """
         self.core_block.clear()
         self.recall_block.clear()
         self.transient_block.clear()
@@ -180,8 +196,10 @@ class MemoryManager:
         """
         Remove all expired facts from recall and transient blocks.
 
-        MUST be called before every reasoning cycle.
-        Returns the list of facts that were scrubbed (for breadcrumb logging).
+        MUST be called before every reasoning cycle to prevent zombie
+        context — stale facts from prior intents that could mislead
+        the current reasoning pass.  Every scrubbed fact is audit-logged
+        so the dashboard can show exactly what was forgotten and when.
         """
         scrubbed: list[MemoryFact] = []
 
@@ -257,7 +275,10 @@ class MemoryManager:
             domain=domain,
             tags=tags or [],
         )
-        # Deduplicate by fact string
+        # Deduplicate by fact string: core facts are populated on every
+        # scenario run (since the guest profile is re-fetched each time).
+        # Without deduplication, repeated runs would bloat the core block
+        # with identical entries.
         if not any(existing.fact == fact for existing in self.core_block):
             self.core_block.append(mf)
         return mf

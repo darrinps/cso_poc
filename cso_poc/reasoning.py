@@ -4,9 +4,22 @@ Layer 4 — Claude Reasoning Engine
 Uses Claude to decompose raw guest messages into structured SubIntent
 objects, informed by guest profile, available tools, and policy rules.
 
-The system prompt encodes all hospitality policies so Claude can reason
-about tier gates, checkout ceilings, pet constraints, and proactive
-recovery patterns.
+Architectural Decision: Policy-encoded system prompt
+  All hospitality business rules (tier gates, checkout ceilings, pet
+  constraints, contradiction detection, ambiguity handling) are encoded
+  directly in the system prompt rather than in code.  This means Claude
+  reasons about policies in a single pass, producing structured output
+  that the orchestrator can execute deterministically.
+
+  The alternative — letting the orchestrator discover policy violations
+  only at execution time — would require multi-round retry loops and
+  could not produce compensatory actions (like drink vouchers) proactively.
+
+Architectural Decision: Structured JSON output over function calling
+  Claude returns a JSON array of SubIntent dicts rather than using the
+  tool_use feature.  This keeps the decomposition step separate from
+  execution: the orchestrator can inspect, modify, and validate all
+  sub-intents before any MCP call is made.
 """
 
 from __future__ import annotations
@@ -134,7 +147,9 @@ async def decompose_with_claude(
         text = response.content[0].text.strip()
         log.info("Claude raw response: %s", text[:500])
 
-        # Strip markdown fences if Claude added them despite instructions
+        # Defensive parsing: Claude occasionally wraps JSON in markdown
+        # code fences despite explicit instructions not to.  Stripping
+        # these fences is cheaper than re-prompting.
         if text.startswith("```"):
             lines = text.split("\n")
             # Remove first and last fence lines
@@ -168,7 +183,13 @@ async def decompose_with_claude(
 
 
 def _escalation_fallback(raw_message: str, reason: str) -> dict:
-    """Return a single escalation SubIntent when Claude fails."""
+    """
+    Return a single escalation SubIntent when Claude fails.
+
+    Safe failure mode: when the API is unreachable or returns unparseable
+    output, the system escalates to human staff rather than silently
+    dropping the request or hallucinating actions.
+    """
     return {
         "description": f"Escalation: {raw_message[:100]}",
         "domain": "Escalation",

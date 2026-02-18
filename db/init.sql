@@ -1,5 +1,17 @@
 -- Layer 7 — System of Record (Mock PMS Database)
 -- Seed schema and data for the hospitality POC.
+--
+-- Architectural Decision: Seed data covers a deliberate tier mix
+--   G-1001 (Diamond): exercises policy ceiling compromises and premium benefits
+--   G-2002 (Gold):    exercises tier-gate denials (Gold can't get late checkout)
+--   G-3003 (Titanium): exercises proactive reassignment (Titanium-only policy)
+--   This mix ensures every policy branch in the MCP gateway is exercised.
+--
+-- Architectural Decision: Room inventory designed for constraint-based queries
+--   Room 101 (floor 1, pet-friendly, near exit, suite) is the only room that
+--   satisfies all constraints for proactive recovery.  Room 201 (floor 2, not
+--   pet-friendly) is a trap: mesh agents that drop the pet-friendly constraint
+--   may assign it incorrectly, proving the context degradation thesis.
 
 CREATE TABLE IF NOT EXISTS guests (
     guest_id    TEXT PRIMARY KEY,
@@ -18,6 +30,10 @@ CREATE TABLE IF NOT EXISTS stays (
     notes          TEXT NOT NULL DEFAULT ''
 );
 
+-- The UNIQUE constraint on (guest_id, reservation_id, benefit_type) provides
+-- database-level idempotency: allocating the same benefit twice for the same
+-- stay is rejected, regardless of whether the orchestrator or mesh makes the
+-- duplicate call.  This is the last line of defense against double-allocation.
 CREATE TABLE IF NOT EXISTS allocated_benefits (
     id             SERIAL PRIMARY KEY,
     guest_id       TEXT NOT NULL REFERENCES guests(guest_id),

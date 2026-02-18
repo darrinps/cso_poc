@@ -47,6 +47,10 @@ breadcrumb_log = logging.getLogger("cso.breadcrumbs")
 # ---------------------------------------------------------------------------
 # Policy constants
 # ---------------------------------------------------------------------------
+# Business rules are enforced here at the MCP gateway level, not in the
+# orchestrator.  This separation is deliberate: even if the orchestrator
+# were compromised or misconfigured, the gateway would still reject
+# invalid mutations.  Defense in depth for data integrity.
 
 DIAMOND_ONLY_BENEFITS = {BenefitType.SUITE_NIGHT_AWARD, BenefitType.LATE_CHECKOUT}
 GENERAL_BENEFITS = {
@@ -80,6 +84,10 @@ def _require_diamond(tier: str, guest_id: str, policy: str) -> None:
 # ---------------------------------------------------------------------------
 # Layer 6 — Decision Breadcrumb decorator
 # ---------------------------------------------------------------------------
+# The decorator pattern is used here because audit logging is a cross-cutting
+# concern: every tool must produce breadcrumbs regardless of its domain logic.
+# Decorating at the tool level ensures no MCP call can bypass the audit trail,
+# even if new tools are added later — the developer simply applies the decorator.
 
 def decision_breadcrumb(policy_reference: str):
     """
@@ -515,7 +523,10 @@ async def pms_reassign_room(
                    f"at {res_row['property_code']}.",
         )
 
-    # Atomic swap: update stay + room statuses
+    # Atomic swap: update stay + room statuses within a single transaction.
+    # Without this, a failure between updating the stay and updating room
+    # status would leave the system in an inconsistent state (guest moved
+    # but old room still marked occupied, new room still marked available).
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
@@ -605,6 +616,10 @@ async def _admin_reset_db(
 # ---------------------------------------------------------------------------
 # Entrypoint — SSE transport for networked access
 # ---------------------------------------------------------------------------
+# SSE (Server-Sent Events) transport enables the orchestrator to connect
+# to the MCP gateway over the Docker network.  The alternative (stdio)
+# would require co-location in the same container, defeating the network
+# isolation that enforces our security model.
 
 if __name__ == "__main__":
     mcp.run(transport="sse")

@@ -23,6 +23,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+# frozen=True ensures model specs are immutable after creation — prevents
+# accidental mutation of shared configuration during concurrent pipeline runs.
 @dataclass(frozen=True)
 class ModelSpec:
     """Immutable specification for an Anthropic model deployment."""
@@ -32,6 +34,9 @@ class ModelSpec:
     purpose: str
 
 
+# Temperature=0 ensures deterministic decomposition: given the same guest
+# request, the CSO should produce the same sub-intents every time. This is
+# critical for testability — strict assertions depend on reproducible output.
 CSO_MODEL = ModelSpec(
     name="claude-sonnet-4-20250514",
     temperature=0,
@@ -39,6 +44,10 @@ CSO_MODEL = ModelSpec(
     purpose="CSO reasoning core — single-pass multi-intent decomposition",
 )
 
+# Temperature=0.2 introduces slight variation in mesh agent responses,
+# simulating the natural non-determinism of independent agents in production.
+# This makes the mesh comparison more realistic: real agent teams don't
+# produce identical outputs on every run.
 MESH_MODEL = ModelSpec(
     name="claude-haiku-4-5-20251001",
     temperature=0.2,
@@ -46,6 +55,7 @@ MESH_MODEL = ModelSpec(
     purpose="Mesh specialist agents — realistic small-agent simulation",
 )
 
+# Flat dict for serialization to the UI scorecard and API responses.
 MODEL_CONFIG: dict[str, dict] = {
     "cso": {
         "model": CSO_MODEL.name,
@@ -62,6 +72,9 @@ MODEL_CONFIG: dict[str, dict] = {
 }
 
 
+# Accessor functions rather than direct imports: allows future extension
+# (e.g., environment-based overrides, A/B testing between model versions)
+# without changing call sites.
 def get_cso_model() -> ModelSpec:
     """Return the CSO model specification."""
     return CSO_MODEL

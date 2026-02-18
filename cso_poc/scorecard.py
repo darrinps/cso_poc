@@ -5,6 +5,21 @@ Scores CSO and mesh results against predefined criteria for each scenario.
 Produces structured JSON with: intents detected/resolved, tools called/expected,
 context items preserved/dropped, policy violations, escalation accuracy,
 compromise detection score, overall score, and model config.
+
+Architectural Decision: Weighted multi-dimensional scoring
+  A single pass/fail metric would hide the nuance of CSO vs. mesh
+  differences.  The weighted dimensions (intent detection 25%, tool
+  accuracy 35%, escalation accuracy 20%, compromise detection 20%)
+  reflect the relative importance of each capability:
+    - Tool accuracy is weighted highest because wrong tool calls
+      produce real data mutations
+    - Compromise detection captures the CSO's unique ability to
+      issue compensatory benefits, which no individual mesh agent can do
+
+Architectural Decision: Separate CSO and mesh scoring functions
+  CSO scoring uses sub-intents (intent decomposition quality) while
+  mesh scoring uses degradation_chain length as a proxy for context
+  loss.  These are fundamentally different measurement surfaces.
 """
 
 from __future__ import annotations
@@ -135,7 +150,13 @@ def score_cso_result(scenario_name: str, cso_result: dict) -> dict[str, Any]:
     # Policy violations (errors in results)
     policy_violations = [a for a in actions if a.get("result", {}).get("error")]
 
-    # Overall score (weighted)
+    # Overall score (weighted):
+    #   Intent detection (0.25) — did the CSO find all sub-intents?
+    #   Tool accuracy    (0.35) — did it call the right MCP tools?
+    #   Escalation       (0.20) — did it correctly flag unresolvable items?
+    #   Compromise       (0.20) — did it detect and compensate policy gaps?
+    # Policy violations are penalized as a deduction (0.1 per violation)
+    # to ensure errors are never masked by high sub-scores.
     intent_score = min(intents_detected, intents_expected) / max(intents_expected, 1)
     tool_score = tools_matched / max(len(tools_expected), 1)
     escalation_score = 1.0 if escalation_accurate else 0.5

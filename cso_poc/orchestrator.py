@@ -1,21 +1,38 @@
 """
 Layer 4 — CSO Orchestrator  (Centralized Reasoning + Cognitive Fallback + Memory)
 
-Three-phase pipeline per turn:
+Five-phase pipeline per turn:
   Phase 0 — SCRUB:     Run scrub_expired_context() to purge zombie facts.
-  Phase 1 — DECOMPOSE: Break raw guest text into sub-intents.
+  Phase 1 — DECOMPOSE: Break raw guest text into sub-intents via Claude.
   Phase 2 — REASON:    Check each against MCP manifest + policy ceilings.
                         Apply Cognitive Fallback where needed.
   Phase 3 — EXECUTE:   Dispatch the CanonicalIntentEnvelope via MCP.
   Phase 4 — MEMORISE:  Write facts into the three memory blocks and
                         force-expire transient sentiment.
 
-Memory architecture (mock Letta):
+Memory architecture (inspired by Letta/MemGPT):
   core_block      — permanent guest facts (tier, preferences)
   recall_block    — tactical journey history (48 h TTL)
   transient_block — in-flight sentiment / hypotheses (expires on resolve)
 
-Exposes a FastAPI HTTP interface for the Streamlit dashboard (Layer 2).
+Architectural Decision: Centralized reasoning over agent negotiation
+  The CSO processes all sub-intents in a single pass with full context
+  visibility.  This eliminates the "telephone game" problem where context
+  degrades at each agent-to-agent handoff.  The tradeoff is a larger
+  prompt and higher per-call latency — but accuracy improves measurably,
+  especially for multi-intent requests with cross-domain dependencies.
+
+Architectural Decision: Cognitive Fallback as a deterministic cascade
+  The fallback logic is a priority-ordered cascade, not a decision tree:
+    1. No MCP tool exists → escalate to human staff
+    2. Tier gate violation → deny + escalate
+    3. Policy ceiling exceeded → clamp + compensate
+    4. All clear → execute normally
+  Each branch produces a structured audit trail (Decision Breadcrumbs)
+  so every outcome is explainable.
+
+Exposes a FastAPI HTTP interface for the Streamlit dashboard (Layer 2)
+and an embedded single-page HTML UI for the scenario runner.
 """
 
 from __future__ import annotations
@@ -63,6 +80,11 @@ MCP_GATEWAY_URL = os.environ.get(
 # ---------------------------------------------------------------------------
 # Shared state
 # ---------------------------------------------------------------------------
+# Module-level singletons: memory, breadcrumbs, and chat history are shared
+# across all request handlers within a single process.  The thread lock
+# protects breadcrumb_stream because FastAPI may process requests concurrently
+# (e.g., scenario + health check), and list.append is not atomic in CPython
+# when combined with iteration.
 
 memory = MemoryManager()
 breadcrumb_stream: list[dict] = []
@@ -113,6 +135,13 @@ def run_memory_scrub(trace_id: str) -> None:
 # ---------------------------------------------------------------------------
 # Phase 1 — Sub-intent decomposition
 # ---------------------------------------------------------------------------
+# The SubIntent dataclass is the bridge between Claude's JSON output and
+# the orchestrator's deterministic reasoning.  Each field maps to a
+# specific decision point in the Cognitive Fallback cascade:
+#   - required_tool=None → no-tool escalation
+#   - tier_violation set → tier-gate denial
+#   - policy_ceiling set → compromise + compensate
+#   - all clear → standard execution
 
 @dataclass
 class SubIntent:
@@ -358,6 +387,11 @@ def reason_and_fallback(
 # ---------------------------------------------------------------------------
 # Phase 3 — Deterministic execution
 # ---------------------------------------------------------------------------
+# The envelope is executed sequentially in action.order, not in parallel.
+# Sequential execution ensures deterministic behavior and makes saga tracking
+# straightforward: we know exactly which actions completed before a failure.
+# Parallel execution would be faster but would require distributed transaction
+# coordination that is out of scope for this POC.
 
 async def execute_envelope(
     envelope: CanonicalIntentEnvelope,
@@ -2032,6 +2066,56 @@ async def freeform_query(req: FreeformRequest):
         mesh_annotation="User-defined query — no preset mesh comparison.",
     )
     return await run_scenario(config)
+
+
+@app.post("/security/scenario/{name}")
+async def run_security_scenario(name: str):
+    """Run a single adversarial scenario against both architectures."""
+    from cso_poc.adversarial import ATTACK_SCENARIOS
+    from cso_poc.scenarios import run_adversarial_scenario
+    from cso_poc.mesh import run_adversarial_mesh_scenario
+
+    if name not in ATTACK_SCENARIOS:
+        return {
+            "error": f"Unknown attack scenario: {name}. "
+            f"Available: {list(ATTACK_SCENARIOS.keys())}"
+        }
+
+    attack = ATTACK_SCENARIOS[name]
+
+    # Run CSO
+    cso_result = await run_adversarial_scenario(attack.config, attack)
+
+    # Reset between runs
+    await reset_state()
+
+    # Run mesh
+    mesh_result = await run_adversarial_mesh_scenario(attack.config, attack)
+
+    return {
+        "scenario": name,
+        "cso": cso_result,
+        "mesh": mesh_result,
+    }
+
+
+@app.post("/security/benchmark")
+async def run_full_benchmark():
+    """Run the complete adversarial corpus and generate reports."""
+    from cso_poc.security_benchmark import run_security_benchmark
+
+    async def reset_fn():
+        await reset_state()
+
+    report = await run_security_benchmark(reset_fn)
+    return {
+        "status": "complete",
+        "corpus_size": report.get("corpus_size"),
+        "cso_metrics": report.get("cso_metrics"),
+        "mesh_metrics": report.get("mesh_metrics"),
+        "comparative_summary": report.get("comparative_summary"),
+        "files_written": ["security_results.json", "security_summary.md"],
+    }
 
 
 @app.get("/health")

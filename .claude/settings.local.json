@@ -18,7 +18,12 @@
       "Bash(Start-Sleep -Seconds 5)",
       "Bash(where:*)",
       "Bash(C:\\\\Python311\\\\python.exe:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git fetch:*)",
+      "Bash(git pull:*)",
+      "Bash(docker cp:*)"
     ]
   }
 }

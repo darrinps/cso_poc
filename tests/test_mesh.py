@@ -6,6 +6,19 @@ with CSO correctly identifies the differences.
 Real agents are non-deterministic, so mesh assertions are loosened while
 CSO assertions remain strict.
 
+Architectural Decision: Informational-only checks for mesh agent behavior
+  Some mesh tests log observations (e.g., "mesh did NOT issue drink voucher")
+  without asserting on them.  This is deliberate: the mesh's behavior varies
+  between runs, and a test that occasionally fails due to agent non-determinism
+  would undermine confidence in the test suite.  The informational logs provide
+  evidence for the comparison analysis without creating flaky tests.
+
+Architectural Decision: Degradation chain length assertions
+  Every mesh scenario asserts that the degradation_chain has entries.
+  This validates that real agents ran and produced handoffs — a basic
+  sanity check that the mesh pipeline is actually exercising LLM calls
+  rather than short-circuiting.
+
 Prerequisites:
     1. docker compose up -d --build   (with ANTHROPIC_API_KEY set)
     2. pytest tests/test_mesh.py -v

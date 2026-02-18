@@ -1,8 +1,21 @@
 """
-CSO Scenario Test Suite — 4 scenarios, ~20 structural assertions.
+CSO Scenario Test Suite — 8 scenarios, ~40 structural assertions.
 
 These tests validate structure, not text.  Claude's phrasing varies;
 we check envelope status, action counts, tool names, and policy references.
+
+Architectural Decision: Structural assertions over text matching
+  Claude's natural language output varies between runs.  Asserting on
+  tool names, benefit types, room numbers, and envelope status makes
+  tests deterministic and meaningful — "did the system do the right
+  thing?" not "did it phrase it the same way?"
+
+Architectural Decision: CSO assertions are strict, mesh assertions are loose
+  The CSO pipeline is deterministic after decomposition (temperature=0),
+  so we assert exact room numbers, benefit types, and policy references.
+  The mesh uses real Haiku agents (temperature=0.2), so mesh tests check
+  structural properties (has actions, has checkout) and log informational
+  observations for human review.
 
 Prerequisites:
     1. docker compose up -d --build   (with ANTHROPIC_API_KEY set)

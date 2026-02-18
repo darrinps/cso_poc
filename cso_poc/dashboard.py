@@ -8,6 +8,19 @@ Right pane:  Three tabs:
   3. Turn History          — envelope summaries per turn
 
 Communicates with the CSO Orchestrator (Layer 4) via its HTTP API.
+
+Architectural Decision: Three-tab layout mirrors three memory blocks
+  The right-pane tabs directly correspond to the memory architecture:
+  breadcrumbs show real-time decisions, the vault shows memory state
+  with TTL decay visualization, and turn history shows the conversation
+  arc.  This layout is designed for executive demonstrations where
+  stakeholders need to see the reasoning process, not just the output.
+
+Architectural Decision: Streamlit over custom frontend
+  Streamlit provides rapid prototyping for data-heavy dashboards without
+  requiring frontend engineering.  For a POC focused on demonstrating
+  AI reasoning patterns, the tradeoff of less UI control for faster
+  iteration is worthwhile.
 """
 
 from __future__ import annotations
